@@ -253,6 +253,24 @@ def build_cancel_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def build_back_menu_keyboard(refresh_action: str | None = None) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = []
+    if refresh_action:
+        row.append(
+            InlineKeyboardButton(
+                text="🔄 Làm mới",
+                callback_data=MenuCallback(action=refresh_action).pack(),
+            )
+        )
+    row.append(
+        InlineKeyboardButton(
+            text="🔙 Quay lại Menu",
+            callback_data=MenuCallback(action="home").pack(),
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -295,12 +313,6 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
                     text="📜 Lịch sử",
                     callback_data=MenuCallback(action="history").pack(),
                 ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❓ Hướng dẫn",
-                    callback_data=MenuCallback(action="help").pack(),
-                )
             ],
         ]
     )

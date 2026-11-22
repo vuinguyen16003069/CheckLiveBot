@@ -37,6 +37,7 @@ from src.modules.watch.ui import (
     WatchActionCallback,
     WizardCallback,
     WizardStates,
+    build_back_menu_keyboard,
     build_cancel_keyboard,
     build_deal_form_keyboard,
     build_field_prompt_keyboard,
@@ -98,7 +99,7 @@ def create_watch_router(
 
     @router.message(Command("help"))
     async def cmd_help(message: Message) -> None:
-        await message.answer(HELP_TEXT, reply_markup=build_main_menu_keyboard())
+        await message.answer(HELP_TEXT, reply_markup=build_back_menu_keyboard())
 
     @router.message(Command("cancel"))
     async def cmd_cancel(message: Message, state: FSMContext) -> None:
@@ -244,7 +245,7 @@ def create_watch_router(
         items = await watch_service.search_watches(message.chat.id, query)
         await message.answer(
             format_search_results(query, items),
-            reply_markup=build_main_menu_keyboard(),
+            reply_markup=build_back_menu_keyboard(),
         )
 
     @router.message(SearchStates.waiting_for_query, F.text)
@@ -254,7 +255,7 @@ def create_watch_router(
         items = await watch_service.search_watches(message.chat.id, query)
         await message.answer(
             format_search_results(query, items),
-            reply_markup=build_main_menu_keyboard(),
+            reply_markup=build_back_menu_keyboard(),
         )
 
     @router.message(CheckOneStates.waiting_for_uid, F.text)
@@ -341,12 +342,18 @@ def create_watch_router(
     @router.message(Command("stats"))
     async def cmd_stats(message: Message) -> None:
         stats = await watch_service.get_stats(message.chat.id)
-        await message.answer(format_watch_stats(stats), reply_markup=build_main_menu_keyboard())
+        await message.answer(
+            format_watch_stats(stats),
+            reply_markup=build_back_menu_keyboard(refresh_action="stats"),
+        )
 
     @router.message(Command("history"))
     async def cmd_history(message: Message) -> None:
         events = await watch_service.get_history(message.chat.id, limit=10)
-        await message.answer(format_watch_history(events), reply_markup=build_main_menu_keyboard())
+        await message.answer(
+            format_watch_history(events),
+            reply_markup=build_back_menu_keyboard(refresh_action="history"),
+        )
 
     @router.message(Command("recheck"))
     async def cmd_recheck(message: Message, command: CommandObject) -> None:
@@ -422,12 +429,20 @@ def create_watch_router(
             )
         elif action == "stats":
             stats = await watch_service.get_stats(msg.chat.id)
-            await _safe_edit(msg, format_watch_stats(stats), build_main_menu_keyboard())
+            await _safe_edit(
+                msg,
+                format_watch_stats(stats),
+                build_back_menu_keyboard(refresh_action="stats"),
+            )
         elif action == "history":
             events = await watch_service.get_history(msg.chat.id, limit=10)
-            await _safe_edit(msg, format_watch_history(events), build_main_menu_keyboard())
+            await _safe_edit(
+                msg,
+                format_watch_history(events),
+                build_back_menu_keyboard(refresh_action="history"),
+            )
         elif action == "help":
-            await _safe_edit(msg, HELP_TEXT, build_main_menu_keyboard())
+            await _safe_edit(msg, HELP_TEXT, build_back_menu_keyboard())
         await query.answer()
 
     @router.callback_query(DealFormCallback.filter())
