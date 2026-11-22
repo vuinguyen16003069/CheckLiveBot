@@ -134,13 +134,37 @@ async def test_deal_form_ui_and_update_details() -> None:
 
 
 def test_wizard_steps_and_cancel_keyboard() -> None:
-    from src.modules.watch.ui import DealDraft, build_wizard_keyboard, format_wizard_step
+    from src.modules.watch.domain import (
+        WatchStats,
+        format_watch_stats,
+        format_welcome_dashboard,
+    )
+    from src.modules.watch.ui import (
+        DealDraft,
+        build_delete_confirm_keyboard,
+        build_list_keyboard,
+        build_reply_keyboard,
+        build_wizard_keyboard,
+        format_wizard_step,
+    )
+
+    stats = WatchStats(total=10, die=4, live=2, done=4, cancelled=0)
+    dash = format_welcome_dashboard(stats)
+    assert "Đang chờ: <b>4</b>" in dash
+    assert "60%" in format_watch_stats(stats)
+
+    rk = build_reply_keyboard()
+    assert len(rk.keyboard) == 2 and len(rk.keyboard[0]) == 2
 
     draft = DealDraft()
     assert "Bước 1/4" in format_wizard_step(1, draft)
-    kb1 = build_wizard_keyboard(allow_skip=False)
+    kb1 = build_wizard_keyboard(step=1)
     assert len(kb1.inline_keyboard[0]) == 1
     assert "Hủy" in kb1.inline_keyboard[0][0].text
+
+    kb3 = build_wizard_keyboard(step=3)
+    assert any(btn.text == "50k" for btn in kb3.inline_keyboard[0])
+    assert any("Quay lại" in btn.text for btn in kb3.inline_keyboard[1])
 
     draft.uid = "100012345678901"
     draft.note = "Khách A"
@@ -148,11 +172,18 @@ def test_wizard_steps_and_cancel_keyboard() -> None:
     step4 = format_wizard_step(4, draft)
     assert "Bước 4/4" in step4
     assert "100012345678901" in step4
-    assert "Khách A" in step4
-    kb4 = build_wizard_keyboard(allow_skip=True)
-    assert len(kb4.inline_keyboard[0]) == 2
-    assert "Bỏ qua" in kb4.inline_keyboard[0][0].text
-    assert "Hủy" in kb4.inline_keyboard[0][1].text
+    kb4 = build_wizard_keyboard(step=4)
+    assert any(btn.text == "282" for btn in kb4.inline_keyboard[0])
+    assert any("Bỏ qua" in btn.text for btn in kb4.inline_keyboard[0])
+
+    sample_item = WatchItem(id=7, chat_id=1, owner_user_id=1, uid="10001", note="N", price="0")
+    list_kb = build_list_keyboard("ALL", 1, 1, [sample_item])
+    flat_texts = [btn.text for row in list_kb.inline_keyboard for btn in row]
+    assert "#7" in flat_texts
+    assert "🔄 Quét lại DIE" in flat_texts
+
+    del_kb = build_delete_confirm_keyboard(7)
+    assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
 
 
 @pytest.mark.asyncio

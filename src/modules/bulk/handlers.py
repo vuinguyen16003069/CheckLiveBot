@@ -110,7 +110,7 @@ def create_bulk_router(
             return
         await state.set_state(BulkStates.waiting_for_uids)
         await message.answer(
-            "📦 <b>Chế độ Check hàng loạt (ARQ Worker)</b>\n\n"
+            "📦 <b>Check hàng loạt</b>\n\n"
             "Gửi danh sách UID (mỗi dòng 1 UID) hoặc gửi trực tiếp file <code>.txt</code>.",
             reply_markup=build_cancel_keyboard(),
         )
@@ -203,7 +203,7 @@ async def _reply_single_check(
 
 
 async def _enqueue_text(message: Message, bulk_service: BulkCheckService, text: str) -> None:
-    status_msg = await message.answer("⏳ Đang tiếp nhận và đẩy danh sách UID vào hàng đợi ARQ...")
+    status_msg = await message.answer("⏳ Đang tiếp nhận danh sách UID...")
     try:
         job_id, total, skipped = await bulk_service.enqueue_bulk_text(
             chat_id=message.chat.id,
@@ -220,6 +220,6 @@ async def _enqueue_text(message: Message, bulk_service: BulkCheckService, text: 
     extra = f" (đã lọc bỏ {skipped:,} dòng trùng/lỗi)" if skipped else ""
     await status_msg.edit_text(
         f"📥 <b>Đã nhận {total:,} UID</b>{extra}\n"
-        f"🆔 Job: <code>#{job_id}</code>\n"
-        "⚙️ Worker đang xử lý ngầm và sẽ cập nhật tiến độ mỗi vài giây..."
+        f"🆔 Mã phiên: <code>#{job_id}</code>\n"
+        "⚙️ Bot đang kiểm tra ngầm và sẽ cập nhật tiến độ liên tục..."
     )

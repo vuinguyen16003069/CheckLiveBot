@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from src.modules.bulk.domain import extract_uid
+from src.modules.bulk.domain import extract_uid, render_progress_bar
 
 _VN_TZ = timezone(timedelta(hours=7))
 
@@ -230,14 +230,34 @@ def format_watch_list(
     return "\n".join(rows)
 
 
+def format_welcome_dashboard(stats: WatchStats) -> str:
+    summary = (
+        f"🔴 Đang chờ: <b>{stats.die}</b> | "
+        f"🟢 LIVE: <b>{stats.live}</b> | "
+        f"✅ Done: <b>{stats.done}</b> | "
+        f"📦 Tổng: <b>{stats.total}</b>"
+    )
+    return (
+        "👋 <b>Chào mừng đến với CheckLiveBot!</b>\n\n"
+        f"📊 {summary}\n\n"
+        "✨ <b>Dùng cực nhanh:</b>\n"
+        "• Dán thẳng <b>1 UID / link Facebook</b> để check ngay\n"
+        "• Dán <b>nhiều dòng UID</b> hoặc gửi <b>file .txt</b> để check hàng loạt\n"
+        "• Hoặc chọn nhanh nút bên dưới:"
+    )
+
+
 def format_watch_stats(stats: WatchStats) -> str:
+    completed = stats.live + stats.done
+    bar = render_progress_bar(completed, stats.total, width=10)
     return (
         "📊 <b>Thống kê kèo trong chat</b>\n\n"
         f"• Tổng số kèo: <b>{stats.total}</b>\n"
         f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>\n"
         f"• 🟢 Đã về LIVE: <b>{stats.live}</b>\n"
         f"• ✅ Đã Done: <b>{stats.done}</b>\n"
-        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>"
+        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>\n\n"
+        f"📈 Tỷ lệ về LIVE / Done: <code>{bar}</code>"
     )
 
 
