@@ -28,7 +28,6 @@ BOT_COMMANDS: list[BotCommand] = [
     BotCommand(command="check", description="Kiểm tra nhanh 1 UID hoặc link FB"),
     BotCommand(command="add", description="Lên kèo theo dõi DIE → LIVE"),
     BotCommand(command="list", description="Danh sách kèo (chạm UID xem chi tiết)"),
-    BotCommand(command="recheck", description="Quét lại ngay các kèo đang DIE"),
     BotCommand(command="stats", description="Thống kê số lượng kèo"),
     BotCommand(command="help", description="Hướng dẫn sử dụng"),
 ]

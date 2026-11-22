@@ -119,7 +119,7 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         header = (
             f"🔔 🟢 <b>THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!</b> <i>(#{item.id})</i>"
             if item.status == WatchStatus.LIVE
-            else f"✅ <b>Đã thêm UID thành công!</b> <i>(#{item.id})</i>"
+            else f"✅ <b>Chi tiết kèo theo dõi</b> <i>(#{item.id})</i>"
         )
     else:
         header = f"<b>{html.escape(title)}</b> <i>(#{item.id})</i>"

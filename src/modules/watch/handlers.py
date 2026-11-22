@@ -56,7 +56,7 @@ HELP_TEXT = (
     "• Dán nhiều dòng UID hoặc gửi file <code>.txt</code> → Check hàng loạt (trả 1 file kết quả)\n\n"
     "<b>3. Lệnh nhanh</b>\n"
     "• <code>/add UID | ghi chú | giá | FAQ</code>\n"
-    "• <code>/check &lt;UID / link FB&gt;</code> | <code>/list</code> | <code>/recheck</code> | <code>/stats</code>"
+    "• <code>/check &lt;UID / link FB&gt;</code> | <code>/list</code> | <code>/stats</code>"
 )
 
 
@@ -268,31 +268,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def cmd_stats(message: Message) -> None:
         stats = await watch_service.get_stats(message.chat.id)
         await message.answer(format_watch_stats(stats))
-
-    @router.message(Command("recheck"))
-    async def cmd_recheck(message: Message, command: CommandObject) -> None:
-        arg = (command.args or "").strip()
-        target_uid = extract_uid(arg) if arg else None
-        if arg and not target_uid:
-            await message.answer(
-                "❌ UID không hợp lệ. Ví dụ: <code>/recheck 100045216769361</code>"
-            )
-            return
-        scanned, turned_live = await watch_service.recheck_chat(
-            message.chat.id,
-            target_uid=target_uid,
-        )
-        if scanned == 0:
-            await message.answer("📭 Không có kèo DIE nào cần kiểm tra lại.")
-            return
-        await message.answer(
-            f"🔄 Đã quét lại <b>{scanned}</b> kèo DIE — Phát hiện <b>{len(turned_live)}</b> kèo về LIVE."
-        )
-        for item in turned_live:
-            await message.answer(
-                format_live_notification(item),
-                reply_markup=build_watch_keyboard(item),
-            )
 
     @router.callback_query(DashboardCallback.filter())
     async def cb_dashboard(
