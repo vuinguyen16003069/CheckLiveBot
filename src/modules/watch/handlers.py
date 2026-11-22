@@ -96,10 +96,9 @@ def create_watch_router(
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         stats = await watch_service.get_stats(message.chat.id)
-        await message.answer(
-            "⌨️ Bàn phím nhanh đã sẵn sàng ở dưới!",
-            reply_markup=build_reply_keyboard(),
-        )
+        tmp = await message.answer("⚡", reply_markup=build_reply_keyboard())
+        with contextlib.suppress(TelegramBadRequest):
+            await tmp.delete()
         await message.answer(
             format_welcome_dashboard(stats),
             reply_markup=build_main_menu_keyboard(),
