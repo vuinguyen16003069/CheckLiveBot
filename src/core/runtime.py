@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 from typing import Any
 
@@ -168,13 +169,7 @@ def build_dispatcher(
     return dp
 
 
-def build_webhook_app(
-    *,
-    dp: Dispatcher,
-    bot: Bot,
-    redis: Redis,
-    settings: Settings,
-) -> web.Application:
+def build_health_app(*, redis: Redis, settings: Settings) -> web.Application:
     app = web.Application()
 
     async def health_handler(_request: web.Request) -> web.Response:
@@ -193,6 +188,18 @@ def build_webhook_app(
         )
 
     app.router.add_get("/health", health_handler)
+    app.router.add_get("/", health_handler)
+    return app
+
+
+def build_webhook_app(
+    *,
+    dp: Dispatcher,
+    bot: Bot,
+    redis: Redis,
+    settings: Settings,
+) -> web.Application:
+    app = build_health_app(redis=redis, settings=settings)
     webhook_path = (
         settings.webhook_path
         if settings.webhook_path.startswith("/")
@@ -314,9 +321,25 @@ async def run_bot(settings: Settings) -> None:
             finally:
                 await runner.cleanup()
         else:
-            await bot.delete_webhook(drop_pending_updates=False)
-            logger.info("polling_started")
-            await dp.start_polling(bot)
+            health_runner: web.AppRunner | None = None
+            if os.environ.get("PORT"):
+                health_app = build_health_app(redis=redis, settings=settings)
+                health_runner = web.AppRunner(health_app)
+                await health_runner.setup()
+                health_site = web.TCPSite(health_runner, host=settings.host, port=settings.port)
+                await health_site.start()
+                logger.info(
+                    "health_server_listening_for_polling",
+                    host=settings.host,
+                    port=settings.port,
+                )
+            try:
+                await bot.delete_webhook(drop_pending_updates=False)
+                logger.info("polling_started")
+                await dp.start_polling(bot)
+            finally:
+                if health_runner is not None:
+                    await health_runner.cleanup()
     finally:
         if inline_worker is not None and worker_task is not None:
             with contextlib.suppress(Exception):

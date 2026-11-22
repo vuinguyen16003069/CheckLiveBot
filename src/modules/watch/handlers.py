@@ -256,7 +256,7 @@ def create_watch_router(
         await message.answer(
             "📥 <b>Thêm nhiều kèo cùng lúc</b>\n\n"
             "Gửi danh sách (mỗi dòng 1 kèo) hoặc file <code>.txt</code> theo mẫu:\n"
-            "<code>100057257853932 | Zalo Vui | 50k | 282</code>",
+            "<code>100057257853932 | Kèo 1 | 50k | 282</code>",
             reply_markup=build_cancel_keyboard(),
         )
 

@@ -293,7 +293,7 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
 
     prompts = {
         1: "🆔 <b>Bước 1/4 — Nhập UID</b> (hoặc dán link <code>profile.php?id=...</code>):",
-        2: "📝 <b>Bước 2/4 — Nhập ghi chú</b> cho kèo (VD: <code>Zalo Vui</code>):",
+        2: "📝 <b>Bước 2/4 — Nhập ghi chú</b> cho kèo (VD: <code>Kèo 1</code>):",
         3: "💰 <b>Bước 3/4 — Chọn nhanh giá bên dưới</b> hoặc gõ giá bất kỳ:",
         4: "❓ <b>Bước 4/4 — Chọn nhanh FAQ bên dưới</b>, gõ lưu ý, hoặc bấm <b>Bỏ qua</b>:",
     }
