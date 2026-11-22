@@ -88,41 +88,12 @@ def build_key_groups(keys: list[str], prefix: str = "checklivebot") -> dict[str,
     return groups
 
 
-async def collect_watch_summary(r: Redis, prefix: str) -> dict[str, int]:
-    """Tổng hợp nhanh số lượng kèo CheckLiveBot đang lưu trên Redis RAM."""
-    watch_keys = await get_all_keys(r, f"{prefix}:watch:*")
-    counts = {"total": 0, "DIE": 0, "LIVE": 0, "DONE": 0, "CANCELLED": 0}
-    if not watch_keys:
-        return counts
-    raws = await r.mget(watch_keys)
-    for raw in raws:
-        if not raw:
-            continue
-        try:
-            item = json.loads(raw)
-        except Exception:
-            continue
-        counts["total"] += 1
-        status = str(item.get("status", ""))
-        if status in counts:
-            counts[status] += 1
-    return counts
-
-
 async def show_db_capacity(r: Redis, prefix: str) -> None:
-    """Xem dung lượng và thống kê hoạt động của Upstash Redis & CheckLiveBot."""
-    print(f"\n{C_BOLD}{C_WHITE}=== UPSTASH REDIS CAPACITY & CHECKLIVEBOT STATS ==={C_RESET}\n")
+    """Xem dung lượng và bộ nhớ của Upstash Redis."""
+    print(f"\n{C_BOLD}{C_WHITE}=== UPSTASH REDIS CAPACITY ==={C_RESET}\n")
     try:
         info: dict[str, Any] = await r.info()
         keys = await get_all_keys(r)
-        watch_stats = await collect_watch_summary(r, prefix)
-
-        print(f"{C_CYAN}📊 Thống Kê Kèo CheckLiveBot (Redis RAM):{C_RESET}")
-        print(f"  • Tổng số kèo:        {C_GREEN}{watch_stats['total']:,}{C_RESET}")
-        print(f"  • 🔴 Đang chờ (DIE):  {C_YELLOW}{watch_stats['DIE']:,}{C_RESET}")
-        print(f"  • 🟢 Đã về LIVE:      {C_GREEN}{watch_stats['LIVE']:,}{C_RESET}")
-        print(f"  • ✅ Đã Done:         {C_GREEN}{watch_stats['DONE']:,}{C_RESET}")
-        print(f"  • ❌ Đã Hủy:          {C_GRAY}{watch_stats['CANCELLED']:,}{C_RESET}\n")
 
         print(f"{C_CYAN}💾 Dung Lượng Lưu Trữ & Bộ Nhớ Redis:{C_RESET}")
         print(f"  • Tổng số Keys:       {C_YELLOW}{len(keys)}{C_RESET}")
@@ -423,9 +394,6 @@ async def test_redis_manager_helpers_offline() -> None:
     groups = build_key_groups(keys, prefix="checklivebot")
     assert "checklivebot:watch" in groups
     assert "checklivebot:check_cache" in groups
-
-    summary = await collect_watch_summary(r, prefix="checklivebot")
-    assert summary["total"] == 1 and summary["DIE"] == 1
 
     dump = await fetch_dump_dict(r)
     assert dump["checklivebot:watch:1"]["type"] == "string"
