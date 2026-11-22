@@ -20,6 +20,15 @@ from src.modules.watch.domain import (
 logger = structlog.get_logger(__name__)
 
 
+class DuplicateWatchError(ValueError):
+    def __init__(self, existing: WatchItem) -> None:
+        self.existing = existing
+        super().__init__(
+            f"UID <code>{existing.uid}</code> đã tồn tại ở kèo <b>#{existing.id}</b> "
+            f"({existing.status.value})."
+        )
+
+
 class WatchNotifierPort(Protocol):
     async def notify_live(self, item: WatchItem) -> None: ...
 
@@ -239,29 +248,15 @@ class WatchService:
         self._max_active_per_chat = max_active_per_chat
         self._concurrency = max(1, concurrency)
 
-    async def upsert_watch(
-        self, chat_id: int, user_id: int, raw_args: str
-    ) -> tuple[WatchItem, bool]:
+    async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
+        return await self._repo.find_by_uid(chat_id, uid)
+
+    async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
         parsed = parse_add_line(raw_args)
 
         existing = await self._repo.find_by_uid(chat_id, parsed.uid)
         if existing is not None:
-            existing.note = parsed.note
-            existing.price = parsed.price
-            if parsed.faq:
-                existing.faq = parsed.faq
-            existing.last_checked_at = datetime.now(UTC)
-            updated = await self._repo.update(existing)
-            await self._repo.append_event(
-                WatchEvent(
-                    watch_id=updated.id,
-                    chat_id=chat_id,
-                    uid=updated.uid,
-                    event_type="UPDATED",
-                    detail=f"{updated.note} | {updated.price}",
-                )
-            )
-            return updated, True
+            raise DuplicateWatchError(existing)
 
         if self._max_active_per_chat > 0:
             active_count = await self._repo.count_active_die(chat_id)
@@ -279,7 +274,7 @@ class WatchService:
             await self._cache.set_cached_outcome(parsed.uid, outcome, self._cache_ttl)
 
         initial_status = WatchStatus.LIVE if outcome == CheckOutcome.LIVE else WatchStatus.DIE
-        created = await self._repo.create(
+        return await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
             uid=parsed.uid,
@@ -288,11 +283,11 @@ class WatchService:
             faq=parsed.faq,
             status=initial_status,
         )
-        return created, False
 
-    async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
-        item, _ = await self.upsert_watch(chat_id, user_id, raw_args)
-        return item
+    async def upsert_watch(
+        self, chat_id: int, user_id: int, raw_args: str
+    ) -> tuple[WatchItem, bool]:
+        return await self.add_watch(chat_id, user_id, raw_args), False
 
     async def get_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         return await self._require_owned(chat_id, watch_id)
@@ -351,18 +346,17 @@ class WatchService:
     ) -> tuple[list[WatchItem], int, list[str]]:
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         added: list[WatchItem] = []
-        updated_count = 0
+        duplicate_count = 0
         errors: list[str] = []
         for idx, line in enumerate(lines, start=1):
             try:
-                item, was_updated = await self.upsert_watch(chat_id, user_id, line)
-                if was_updated:
-                    updated_count += 1
-                else:
-                    added.append(item)
+                item = await self.add_watch(chat_id, user_id, line)
+                added.append(item)
+            except DuplicateWatchError:
+                duplicate_count += 1
             except ValueError as exc:
                 errors.append(f"Dòng {idx}: {exc}")
-        return added, updated_count, errors
+        return added, duplicate_count, errors
 
     async def list_watches(
         self,

@@ -23,7 +23,7 @@ from src.modules.watch.domain import (
     format_watch_stats,
     format_welcome_dashboard,
 )
-from src.modules.watch.service import WatchService
+from src.modules.watch.service import DuplicateWatchError, WatchService
 from src.modules.watch.ui import (
     FIELD_PROMPTS,
     REPLY_BTN_ADD,
@@ -160,6 +160,15 @@ def create_watch_router(
                 reply_markup=build_wizard_keyboard(step=1),
             )
             return
+        existing = await watch_service.find_by_uid(message.chat.id, uid)
+        if existing is not None:
+            await message.answer(
+                f"⚠️ UID <code>{uid}</code> đã tồn tại ở kèo <b>#{existing.id}</b> "
+                f"({existing.status.value})!\n"
+                "👉 Gửi <b>UID khác</b> hoặc bấm nút dưới để mở kèo cũ:",
+                reply_markup=_duplicate_watch_keyboard(existing.id, in_wizard=True),
+            )
+            return
         draft.uid = uid
         await _advance_wizard_in_place(message, state, bot, draft, next_step=2)
 
@@ -265,11 +274,11 @@ def create_watch_router(
         text = (message.text or "").strip()
         await state.clear()
         user_id = message.from_user.id if message.from_user else 0
-        added, updated_count, errors = await watch_service.add_watch_batch(
+        added, dup_count, errors = await watch_service.add_watch_batch(
             message.chat.id, user_id, text
         )
         lines = [
-            f"✅ Thêm mới: <b>{len(added)}</b> kèo | ♻️ Cập nhật (trùng UID): <b>{updated_count}</b> kèo."
+            f"✅ Thêm mới: <b>{len(added)}</b> kèo | ⏭ Bỏ qua (trùng UID): <b>{dup_count}</b> kèo."
         ]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
@@ -286,11 +295,11 @@ def create_watch_router(
         await bot.download(document, destination=buf)
         text = buf.getvalue().decode("utf-8", errors="ignore")
         user_id = message.from_user.id if message.from_user else 0
-        added, updated_count, errors = await watch_service.add_watch_batch(
+        added, dup_count, errors = await watch_service.add_watch_batch(
             message.chat.id, user_id, text
         )
         lines = [
-            f"✅ Từ file — Thêm mới: <b>{len(added)}</b> kèo | ♻️ Cập nhật (trùng UID): <b>{updated_count}</b> kèo."
+            f"✅ Từ file — Thêm mới: <b>{len(added)}</b> kèo | ⏭ Bỏ qua (trùng UID): <b>{dup_count}</b> kèo."
         ]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
@@ -654,6 +663,14 @@ def create_watch_router(
         if not isinstance(msg, Message):
             await query.answer()
             return
+        existing = await watch_service.find_by_uid(msg.chat.id, callback_data.uid)
+        if existing is not None:
+            await msg.answer(
+                format_watch_card(existing, title="⚠️ UID này đã có trong danh sách!"),
+                reply_markup=build_watch_keyboard(existing),
+            )
+            await query.answer(f"⚠️ UID đã tồn tại ở kèo #{existing.id}!", show_alert=False)
+            return
         await _start_wizard(msg, state, DealDraft(uid=callback_data.uid), step=2)
         await query.answer("📝 Đã điền sẵn UID — nhập ghi chú nhé!")
 
@@ -867,12 +884,20 @@ async def _finalize_wizard(
 
     await state.clear()
     try:
-        item, updated = await watch_service.upsert_watch(message.chat.id, user_id, raw_line)
+        item = await watch_service.add_watch(message.chat.id, user_id, raw_line)
+    except DuplicateWatchError as exc:
+        text = f"⚠️ {exc}\nBấm nút dưới để mở hoặc sửa kèo cũ:"
+        markup = _duplicate_watch_keyboard(exc.existing.id, in_wizard=False)
+        if edit_existing:
+            await _safe_edit(message, text, markup)
+        else:
+            await message.answer(text, reply_markup=markup)
+        return
     except ValueError as exc:
         await message.answer(f"❌ {exc}", reply_markup=build_back_menu_keyboard())
         return
 
-    title = "♻️ Đã cập nhật UID thành công!" if updated else "✅ Đã thêm UID thành công!"
+    title = "✅ Đã thêm UID thành công!"
     text = format_watch_card(item, title=title)
     markup = build_watch_keyboard(item)
 
@@ -919,15 +944,44 @@ async def _open_deal_form(
 async def _handle_upsert_watch(message: Message, watch_service: WatchService, raw: str) -> None:
     user_id = message.from_user.id if message.from_user else 0
     try:
-        item, updated = await watch_service.upsert_watch(message.chat.id, user_id, raw)
+        item = await watch_service.add_watch(message.chat.id, user_id, raw)
+    except DuplicateWatchError as exc:
+        await message.answer(
+            f"⚠️ {exc}\nBấm nút dưới để mở hoặc sửa kèo cũ:",
+            reply_markup=_duplicate_watch_keyboard(exc.existing.id, in_wizard=False),
+        )
+        return
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
-    title = "♻️ Đã cập nhật UID thành công!" if updated else "✅ Đã thêm UID thành công!"
     await message.answer(
-        format_watch_card(item, title=title),
+        format_watch_card(item, title="✅ Đã thêm UID thành công!"),
         reply_markup=build_watch_keyboard(item),
     )
+
+
+def _duplicate_watch_keyboard(watch_id: int, *, in_wizard: bool) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = [
+        InlineKeyboardButton(
+            text=f"📌 Mở kèo #{watch_id}",
+            callback_data=OpenWatchCallback(watch_id=watch_id).pack(),
+        )
+    ]
+    if in_wizard:
+        row.append(
+            InlineKeyboardButton(
+                text="❌ Hủy",
+                callback_data=WizardCallback(action="cancel").pack(),
+            )
+        )
+    else:
+        row.append(
+            InlineKeyboardButton(
+                text="🔙 Quay lại Menu",
+                callback_data=MenuCallback(action="home").pack(),
+            )
+        )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 async def _safe_edit(
