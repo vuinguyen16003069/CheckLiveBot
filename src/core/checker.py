@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -13,6 +14,13 @@ from src.core.ports import CheckOutcome, UidCheckResult
 logger = structlog.get_logger(__name__)
 
 FB_GRAPH_PICTURE_URL = "https://graph.facebook.com/{uid}/picture?redirect=false"
+FB_WEB_PROFILE_URL = "https://www.facebook.com/{username}"
+
+_OG_TITLE_RE = re.compile(
+    r'property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', re.IGNORECASE
+)
+_USER_ID_RE = re.compile(r'"(?:userID|entity_id)":"(\d+)"')
+_GENERIC_TITLES = {"facebook", "log in or sign up", "log into facebook", "đăng nhập facebook"}
 
 
 class _RetryableCheckError(Exception):
@@ -51,7 +59,12 @@ class CurlCffiFacebookChecker:
         self._session: AsyncSession = session or AsyncSession(impersonate="chrome")
 
     async def check(self, uid: str) -> UidCheckResult:
-        url = FB_GRAPH_PICTURE_URL.format(uid=uid)
+        is_numeric = uid.isdigit()
+        url = (
+            FB_GRAPH_PICTURE_URL.format(uid=uid)
+            if is_numeric
+            else FB_WEB_PROFILE_URL.format(username=uid)
+        )
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self._max_retries),
@@ -60,7 +73,11 @@ class CurlCffiFacebookChecker:
                 reraise=True,
             ):
                 with attempt:
-                    outcome, detail = await self._fetch_once(url)
+                    outcome, detail = (
+                        await self._fetch_graph_once(url)
+                        if is_numeric
+                        else await self._fetch_username_once(url)
+                    )
                     return UidCheckResult(
                         uid=uid,
                         outcome=outcome,
@@ -76,7 +93,7 @@ class CurlCffiFacebookChecker:
 
         return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail="unknown")
 
-    async def _fetch_once(self, url: str) -> tuple[CheckOutcome, str | None]:
+    async def _fetch_graph_once(self, url: str) -> tuple[CheckOutcome, str | None]:
         proxy = self._proxy_pool.next_proxy()
         kwargs: dict[str, Any] = {"timeout": self._timeout}
         if proxy:
@@ -100,9 +117,42 @@ class CurlCffiFacebookChecker:
 
         return parse_graph_picture_payload(payload, status_code)
 
+    async def _fetch_username_once(self, url: str) -> tuple[CheckOutcome, str | None]:
+        proxy = self._proxy_pool.next_proxy()
+        kwargs: dict[str, Any] = {"timeout": self._timeout}
+        if proxy:
+            kwargs["proxy"] = proxy
+
+        try:
+            response = await self._session.get(url, **kwargs)
+        except Exception as exc:
+            raise _RetryableCheckError(f"request_failed: {exc}") from exc
+
+        status_code = int(response.status_code)
+        if status_code == 429 or status_code >= 500:
+            raise _RetryableCheckError(f"http_{status_code}")
+        if status_code == 404:
+            return CheckOutcome.DIE, "http_404"
+
+        return parse_web_profile_html(response.text, status_code)
+
     async def close(self) -> None:
         if self._owns_session:
             await self._session.close()
+
+
+def parse_web_profile_html(
+    html_text: str,
+    status_code: int = 200,
+) -> tuple[CheckOutcome, str | None]:
+    if not html_text:
+        return CheckOutcome.ERROR, f"empty_html_http_{status_code}"
+    uid_match = _USER_ID_RE.search(html_text)
+    og_match = _OG_TITLE_RE.search(html_text)
+    og_title = og_match.group(1).strip() if og_match else ""
+    if uid_match or (og_title and og_title.lower() not in _GENERIC_TITLES):
+        return CheckOutcome.LIVE, og_title or None
+    return CheckOutcome.DIE, "profile_unavailable"
 
 
 def parse_graph_picture_payload(

@@ -6,7 +6,12 @@ from typing import Any
 import fakeredis.aioredis
 import pytest
 
-from src.core.checker import CurlCffiFacebookChecker, ProxyPool, parse_graph_picture_payload
+from src.core.checker import (
+    CurlCffiFacebookChecker,
+    ProxyPool,
+    parse_graph_picture_payload,
+    parse_web_profile_html,
+)
 from src.core.config import Settings
 from src.core.ports import CheckOutcome
 from src.core.redis import RedisCache, build_arq_redis_settings
@@ -64,6 +69,11 @@ def test_parse_graph_picture_payload() -> None:
     assert parse_graph_picture_payload(live)[0] == CheckOutcome.LIVE
     assert parse_graph_picture_payload({"error": {"code": 100}})[0] == CheckOutcome.DIE
     assert parse_graph_picture_payload({"data": {}})[0] == CheckOutcome.DIE
+
+    live_html = '<meta property="og:title" content="Mark Zuckerberg" />{"userID":"4"}'
+    die_html = "<html><title>Facebook</title><body>Content unavailable</body></html>"
+    assert parse_web_profile_html(live_html)[0] == CheckOutcome.LIVE
+    assert parse_web_profile_html(die_html)[0] == CheckOutcome.DIE
 
 
 async def test_checker_live_die_and_retry_with_proxy_rotation() -> None:
