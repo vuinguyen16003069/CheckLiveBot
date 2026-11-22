@@ -221,7 +221,7 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
         "👋 <b>CheckLiveBot</b>\n\n"
         f"📊 {summary}\n\n"
         "✨ <b>Dùng nhanh:</b>\n"
-        "• Chọn 4 nút ở đáy màn hình: <b>Lên kèo</b>, <b>Danh sách</b>, <b>Check nhanh</b>, <b>Thống kê</b>\n"
+        "• Chọn 1-4 nút ở dưới: <b>Lên kèo</b>, <b>Danh sách</b>, <b>Check nhanh</b>, <b>Thống kê</b>\n"
         "• Hoặc dán thẳng <b>UID / link Facebook / nhiều dòng UID / file .txt</b>"
     )
 
