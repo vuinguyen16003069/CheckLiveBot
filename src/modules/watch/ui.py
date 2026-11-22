@@ -201,7 +201,7 @@ def recover_draft_from_text(text: str | None) -> DealDraft:
 def build_watch_keyboard(
     item: WatchItem,
     *,
-    back_status: str | None = None,
+    back_status: str | None = "ALL",
     back_page: int = 1,
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
