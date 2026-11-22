@@ -95,6 +95,37 @@ async def test_watch_upsert_search_and_delete() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deal_form_ui_and_update_details() -> None:
+    from src.modules.watch.ui import DealDraft, build_deal_form_keyboard, format_deal_form
+
+    draft = DealDraft(uid="100012345678901", note="<Khách A>", price="150k")
+    form_text = format_deal_form(draft)
+    assert "LÊN KÈO MỚI" in form_text
+    assert "100012345678901" in form_text
+    assert "&lt;Khách A&gt;" in form_text
+    kb_create = build_deal_form_keyboard(draft)
+    assert len(kb_create.inline_keyboard) == 3
+
+    edit_draft = DealDraft(watch_id=5, uid="100012345678901", note="A", price="100k")
+    assert "SỬA KÈO #5" in format_deal_form(edit_draft)
+    kb_edit = build_deal_form_keyboard(edit_draft)
+    assert any("Lưu thay đổi" in btn.text for row in kb_edit.inline_keyboard for btn in row)
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cache = RedisCache(redis, prefix="test")
+    repo = RedisWatchRepository(redis, prefix="test")
+    svc = WatchService(repo=repo, checker=_StubChecker({"100088": CheckOutcome.DIE}), cache=cache)
+
+    item = await svc.add_watch(100, 1, "100088 | Cũ | 10k")
+    updated = await svc.update_watch_details(100, item.id, note="Mới", price="99k", faq="FAQ 1")
+    assert (updated.note, updated.price, updated.faq) == ("Mới", "99k", "FAQ 1")
+
+    with pytest.raises(ValueError):
+        await svc.update_watch_details(999, item.id, note="Hack", price="0", faq="")
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
 async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     cache = RedisCache(redis, prefix="test")

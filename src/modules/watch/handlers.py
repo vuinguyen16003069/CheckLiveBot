@@ -6,18 +6,12 @@ import io
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
-from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from src.core.ports import CheckOutcome
-from src.modules.bulk.domain import extract_uid
+from src.modules.bulk.domain import extract_uid, format_single_check
+from src.modules.bulk.service import BulkCheckService
 from src.modules.watch.domain import (
     WatchItem,
     WatchStatus,
@@ -29,186 +23,44 @@ from src.modules.watch.domain import (
     format_watch_stats,
 )
 from src.modules.watch.service import WatchService
-
-
-class AddOneStates(StatesGroup):
-    waiting_for_item = State()
-
-
-class AddListStates(StatesGroup):
-    waiting_for_lines = State()
-
-
-class MenuCallback(CallbackData, prefix="m"):
-    action: str
-
-
-class WatchActionCallback(CallbackData, prefix="w"):
-    action: str
-    watch_id: int
-
-
-class QuickWatchCallback(CallbackData, prefix="qw"):
-    uid: str
-
-
-class ListPageCallback(CallbackData, prefix="lp"):
-    status: str
-    page: int
-
-
-def build_main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Thêm kèo",
-                    callback_data=MenuCallback(action="add").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📥 Thêm nhiều kèo",
-                    callback_data=MenuCallback(action="addlist").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📦 Check hàng loạt",
-                    callback_data=MenuCallback(action="bulk").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📋 Danh sách kèo",
-                    callback_data=ListPageCallback(status="ALL", page=1).pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Thống kê",
-                    callback_data=MenuCallback(action="stats").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📜 Lịch sử",
-                    callback_data=MenuCallback(action="history").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❓ Hướng dẫn",
-                    callback_data=MenuCallback(action="help").pack(),
-                )
-            ],
-        ]
-    )
-
-
-def build_watch_keyboard(item: WatchItem) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text="🙈 Ẩn thông tin",
-                callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🐵 Hiện thông tin",
-                callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="❌ Hủy kèo",
-                callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="✅ Done kèo",
-                callback_data=WatchActionCallback(action="done", watch_id=item.id).pack(),
-            ),
-        ],
-    ]
-    if item.status == WatchStatus.DIE:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🔄 Kiểm tra lại",
-                    callback_data=WatchActionCallback(action="recheck", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🗑 Xóa",
-                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="✅ Tiếp tục theo dõi",
-                    callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🗑 Xóa",
-                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_list_keyboard(status_filter: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
-    filters = ["ALL", "DIE", "LIVE", "DONE", "CANCELLED"]
-    filter_row = [
-        InlineKeyboardButton(
-            text=f"• {st} •" if st == status_filter else st,
-            callback_data=ListPageCallback(status=st, page=1).pack(),
-        )
-        for st in filters
-    ]
-    nav_row: list[InlineKeyboardButton] = []
-    if page > 1:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="◀️ Trước",
-                callback_data=ListPageCallback(status=status_filter, page=page - 1).pack(),
-            )
-        )
-    nav_row.append(
-        InlineKeyboardButton(
-            text=f"📄 {page}/{total_pages}",
-            callback_data=ListPageCallback(status=status_filter, page=page).pack(),
-        )
-    )
-    if page < total_pages:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="Sau ▶️",
-                callback_data=ListPageCallback(status=status_filter, page=page + 1).pack(),
-            )
-        )
-    rows = [filter_row[:3], filter_row[3:], nav_row]
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔙 Quay lại Menu",
-                callback_data=MenuCallback(action="home").pack(),
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
+from src.modules.watch.ui import (
+    FIELD_PROMPTS,
+    AddListStates,
+    CheckOneStates,
+    DealDraft,
+    DealFormCallback,
+    DealFormStates,
+    ListPageCallback,
+    MenuCallback,
+    QuickWatchCallback,
+    SearchStates,
+    WatchActionCallback,
+    build_cancel_keyboard,
+    build_deal_form_keyboard,
+    build_field_prompt_keyboard,
+    build_list_keyboard,
+    build_main_menu_keyboard,
+    build_watch_keyboard,
+    format_deal_form,
+)
 
 WELCOME_TEXT = (
     "👋 <b>Chào mừng đến với CheckLiveBot!</b>\n\n"
-    "✨ <b>Dùng cực nhanh không cần nhớ lệnh:</b>\n"
-    "• Dán thẳng <b>1 UID</b> hoặc <b>link Facebook</b> → Bot tự check ngay\n"
-    "• Dán <b>nhiều dòng UID</b> hoặc gửi file <code>.txt</code> → Tự check hàng loạt\n\n"
-    "Chọn nhanh tính năng bên dưới hoặc gõ /help:"
+    "✨ <b>Dùng cực nhanh bằng nút bấm UI hoặc lệnh:</b>\n"
+    "• Bấm <b>➕ Lên kèo</b> để mở Form bấm nút nào nhập mục đó\n"
+    "• Hoặc dán thẳng <b>1 UID / link FB</b> / <b>nhiều dòng UID</b> / <b>file .txt</b>\n\n"
+    "Chọn tính năng bên dưới hoặc gõ /help:"
 )
 
 HELP_TEXT = (
     "📖 <b>Hướng dẫn sử dụng CheckLiveBot</b>\n\n"
-    "<b>1. Dùng nhanh không cần gõ lệnh</b>\n"
+    "<b>1. Dùng bằng giao diện UI (bấm nút nào → nhập cái đó)</b>\n"
+    "• Gõ /start để mở Menu nút bấm: Lên kèo, Check 1 UID, Check hàng loạt, Tìm kèo, Danh sách...\n\n"
+    "<b>2. Dùng nhanh không cần lệnh</b>\n"
     "• Dán <code>100012345678901</code> hoặc link <code>profile.php?id=...</code> → Check ngay\n"
     "• Dán danh sách nhiều dòng UID hoặc gửi file <code>.txt</code> → Check hàng loạt (ARQ Worker)\n\n"
-    "<b>2. Theo dõi kèo DIE → LIVE</b>\n"
-    "• <code>/add UID | ghi chú | giá [| FAQ]</code> *(hoặc gọn: <code>/add UID</code>)*\n"
+    "<b>3. Lệnh gõ nhanh</b>\n"
+    "• <code>/add UID | ghi chú | giá [| FAQ]</code> *(hoặc gõ <code>/add</code> mở Form UI)*\n"
     "• <code>/addlist</code> — Thêm nhiều kèo cùng lúc\n"
     "• <code>/list</code> — Danh sách kèo (lọc & phân trang)\n"
     "• <code>/find &lt;UID / từ khóa&gt;</code> — Tìm nhanh kèo\n"
@@ -229,7 +81,10 @@ class TelegramWatchNotifier:
         )
 
 
-def create_watch_router(watch_service: WatchService) -> Router:
+def create_watch_router(
+    watch_service: WatchService,
+    bulk_service: BulkCheckService | None = None,
+) -> Router:
     router = Router(name="watch")
 
     @router.message(Command("start"))
@@ -241,29 +96,20 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def cmd_help(message: Message) -> None:
         await message.answer(HELP_TEXT, reply_markup=build_main_menu_keyboard())
 
+    @router.message(Command("cancel"))
+    async def cmd_cancel(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await message.answer(
+            "🛑 Đã hủy thao tác hiện tại.", reply_markup=build_main_menu_keyboard()
+        )
+
     @router.message(Command("add"))
     async def cmd_add(message: Message, command: CommandObject, state: FSMContext) -> None:
         raw = (command.args or "").strip()
         if not raw:
-            await state.set_state(AddOneStates.waiting_for_item)
-            await message.answer(
-                "📝 <b>Nhập thông tin kèo cần theo dõi</b> (không cần gõ lại /add):\n"
-                "• Đầy đủ: <code>100012345678901 | Khách A | 50k | FAQ</code>\n"
-                "• Gọn: <code>100012345678901 Khách A | 50k</code> hoặc chỉ <code>100012345678901</code>\n\n"
-                "Gõ /cancel để hủy."
-            )
+            await _open_deal_form(message, state, DealDraft())
             return
         await _handle_upsert_watch(message, watch_service, raw)
-
-    @router.message(AddOneStates.waiting_for_item, F.text)
-    async def handle_add_one_text(message: Message, state: FSMContext) -> None:
-        text = (message.text or "").strip()
-        if text.lower() == "/cancel":
-            await state.clear()
-            await message.answer("🛑 Đã hủy thêm kèo.")
-            return
-        await state.clear()
-        await _handle_upsert_watch(message, watch_service, text)
 
     @router.message(Command("addlist"))
     async def cmd_addlist(message: Message, state: FSMContext) -> None:
@@ -271,17 +117,13 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await message.answer(
             "📥 <b>Thêm nhiều kèo cùng lúc</b>\n\n"
             "Gửi danh sách (mỗi dòng 1 kèo) hoặc file <code>.txt</code> theo mẫu:\n"
-            "<code>UID | ghi chú | giá [| FAQ]</code>\n\n"
-            "Gõ /cancel để hủy."
+            "<code>UID | ghi chú | giá [| FAQ]</code>",
+            reply_markup=build_cancel_keyboard(),
         )
 
     @router.message(AddListStates.waiting_for_lines, F.text)
     async def handle_addlist_text(message: Message, state: FSMContext) -> None:
         text = (message.text or "").strip()
-        if text.lower() == "/cancel":
-            await state.clear()
-            await message.answer("🛑 Đã hủy thêm nhiều kèo.")
-            return
         await state.clear()
         user_id = message.from_user.id if message.from_user else 0
         added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
@@ -289,7 +131,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])
-        await message.answer("\n".join(lines))
+        await message.answer("\n".join(lines), reply_markup=build_main_menu_keyboard())
 
     @router.message(AddListStates.waiting_for_lines, F.document)
     async def handle_addlist_doc(message: Message, bot: Bot, state: FSMContext) -> None:
@@ -306,7 +148,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])
-        await message.answer("\n".join(lines))
+        await message.answer("\n".join(lines), reply_markup=build_main_menu_keyboard())
 
     @router.message(Command("list"))
     async def cmd_list(message: Message) -> None:
@@ -321,16 +163,111 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await message.answer(text, reply_markup=build_list_keyboard("ALL", 1, total_pages))
 
     @router.message(Command("find"))
-    async def cmd_find(message: Message, command: CommandObject) -> None:
+    async def cmd_find(message: Message, command: CommandObject, state: FSMContext) -> None:
         query = (command.args or "").strip()
         if not query:
-            await message.answer("🔍 Cú pháp: <code>/find &lt;UID hoặc từ khóa ghi chú&gt;</code>")
+            await state.set_state(SearchStates.waiting_for_query)
+            await message.answer(
+                "🔍 Vui lòng nhập <b>UID</b>, mã <b>#ID</b> hoặc <b>từ khóa ghi chú</b> cần tìm:",
+                reply_markup=build_cancel_keyboard(),
+            )
             return
         items = await watch_service.search_watches(message.chat.id, query)
         await message.answer(
             format_search_results(query, items),
             reply_markup=build_main_menu_keyboard(),
         )
+
+    @router.message(SearchStates.waiting_for_query, F.text)
+    async def handle_search_query(message: Message, state: FSMContext) -> None:
+        query = (message.text or "").strip()
+        await state.clear()
+        items = await watch_service.search_watches(message.chat.id, query)
+        await message.answer(
+            format_search_results(query, items),
+            reply_markup=build_main_menu_keyboard(),
+        )
+
+    @router.message(CheckOneStates.waiting_for_uid, F.text)
+    async def handle_check_one_uid(message: Message, state: FSMContext) -> None:
+        raw = (message.text or "").strip()
+        if bulk_service is None:
+            await state.clear()
+            await message.answer("⚠️ Chức năng check nhanh chưa sẵn sàng.")
+            return
+        try:
+            uid, outcome, from_cache = await bulk_service.check_single_uid(raw)
+        except ValueError as exc:
+            await message.answer(
+                f"❌ {exc}\nVui lòng gửi lại UID hợp lệ:", reply_markup=build_cancel_keyboard()
+            )
+            return
+        await state.clear()
+        markup = None
+        if outcome != CheckOutcome.LIVE:
+            from aiogram.types import InlineKeyboardButton
+
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="➕ Lên kèo UID này",
+                            callback_data=QuickWatchCallback(uid=uid).pack(),
+                        )
+                    ]
+                ]
+            )
+        await message.answer(format_single_check(uid, outcome, from_cache), reply_markup=markup)
+
+    @router.message(DealFormStates.waiting_for_field, F.text)
+    async def handle_deal_form_field_input(message: Message, state: FSMContext, bot: Bot) -> None:
+        data = await state.get_data()
+        draft = DealDraft.model_validate(data.get("deal_draft", {}))
+        field = draft.editing_field
+        raw_val = (message.text or "").strip()
+
+        if field == "uid":
+            uid = extract_uid(raw_val)
+            if not uid:
+                await message.answer(
+                    "❌ UID không hợp lệ (cần 5–20 chữ số hoặc link <code>profile.php?id=...</code>). "
+                    "Vui lòng gửi lại:",
+                    reply_markup=build_field_prompt_keyboard(),
+                )
+                return
+            draft.uid = uid
+        elif field == "note":
+            draft.note = raw_val
+        elif field == "price":
+            draft.price = raw_val
+        elif field == "faq":
+            draft.faq = "" if raw_val == "-" else raw_val
+
+        draft.editing_field = None
+        await state.set_state(DealFormStates.browsing)
+        await state.update_data(deal_draft=draft.model_dump())
+
+        # Refresh the main form message in-place if available, else send a new form message
+        if draft.form_message_id is not None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=draft.form_message_id,
+                    text=format_deal_form(draft),
+                    reply_markup=build_deal_form_keyboard(draft),
+                )
+                with contextlib.suppress(TelegramBadRequest):
+                    await message.delete()
+                return
+            except TelegramBadRequest:
+                pass
+
+        sent = await message.answer(
+            format_deal_form(draft),
+            reply_markup=build_deal_form_keyboard(draft),
+        )
+        draft.form_message_id = sent.message_id
+        await state.update_data(deal_draft=draft.model_dump())
 
     @router.message(Command("stats"))
     async def cmd_stats(message: Message) -> None:
@@ -376,27 +313,43 @@ def create_watch_router(watch_service: WatchService) -> Router:
             await query.answer()
             return
         action = callback_data.action
-        if action == "home":
+        if action in ("home", "cancel_fsm"):
             await state.clear()
             await _safe_edit(msg, WELCOME_TEXT, build_main_menu_keyboard())
         elif action == "add":
-            await state.set_state(AddOneStates.waiting_for_item)
-            await msg.answer(
-                "📝 Gửi thông tin kèo cần theo dõi:\n"
-                "<code>UID | ghi chú | giá [| FAQ]</code> hoặc chỉ <code>UID</code>.\n"
-                "Gõ /cancel để hủy."
-            )
+            await _open_deal_form(msg, state, DealDraft(), edit_existing=True)
         elif action == "addlist":
             await state.set_state(AddListStates.waiting_for_lines)
-            await msg.answer(
-                "📥 Gửi danh sách kèo (mỗi dòng <code>UID | ghi chú | giá [| FAQ]</code>) "
-                "hoặc file <code>.txt</code>. Gõ /cancel để hủy."
+            await _safe_edit(
+                msg,
+                "📥 <b>Thêm nhiều kèo cùng lúc</b>\n\n"
+                "Gửi danh sách (mỗi dòng <code>UID | ghi chú | giá [| FAQ]</code>) "
+                "hoặc gửi file <code>.txt</code>:",
+                build_cancel_keyboard(),
+            )
+        elif action == "check_one":
+            await state.set_state(CheckOneStates.waiting_for_uid)
+            await _safe_edit(
+                msg,
+                "🔎 Vui lòng gửi <b>1 UID</b> hoặc <b>link Facebook</b> cần kiểm tra:",
+                build_cancel_keyboard(),
             )
         elif action == "bulk":
-            await msg.answer(
-                "📦 <b>Check hàng loạt</b>\n\n"
-                "Bạn chỉ cần <b>dán trực tiếp danh sách nhiều dòng UID</b> hoặc <b>gửi file .txt</b> "
-                "vào chat này — Bot sẽ tự nhận diện và chạy ngay!"
+            from src.modules.bulk.handlers import BulkStates
+
+            await state.set_state(BulkStates.waiting_for_uids)
+            await _safe_edit(
+                msg,
+                "📦 <b>Check hàng loạt (ARQ Worker)</b>\n\n"
+                "Vui lòng gửi <b>danh sách nhiều dòng UID</b> hoặc <b>file .txt</b> (tối đa 50.000 UID):",
+                build_cancel_keyboard(),
+            )
+        elif action == "find":
+            await state.set_state(SearchStates.waiting_for_query)
+            await _safe_edit(
+                msg,
+                "🔍 Vui lòng nhập <b>UID</b>, mã <b>#ID</b> hoặc <b>từ khóa ghi chú</b> cần tìm:",
+                build_cancel_keyboard(),
             )
         elif action == "stats":
             stats = await watch_service.get_stats(msg.chat.id)
@@ -408,28 +361,108 @@ def create_watch_router(watch_service: WatchService) -> Router:
             await _safe_edit(msg, HELP_TEXT, build_main_menu_keyboard())
         await query.answer()
 
-    @router.callback_query(QuickWatchCallback.filter())
-    async def cb_quick_watch(query: CallbackQuery, callback_data: QuickWatchCallback) -> None:
+    @router.callback_query(DealFormCallback.filter())
+    async def cb_deal_form(
+        query: CallbackQuery,
+        callback_data: DealFormCallback,
+        state: FSMContext,
+    ) -> None:
         msg = query.message
         if not isinstance(msg, Message):
             await query.answer()
             return
-        user_id = query.from_user.id if query.from_user else 0
-        try:
-            item, updated = await watch_service.upsert_watch(
-                msg.chat.id,
-                user_id,
-                callback_data.uid,
-            )
-        except ValueError as exc:
-            await query.answer(str(exc), show_alert=True)
+
+        data = await state.get_data()
+        draft = DealDraft.model_validate(data.get("deal_draft", {}))
+        draft.form_message_id = msg.message_id
+        action = callback_data.action
+
+        if action == "cancel":
+            await state.clear()
+            await _safe_edit(msg, "🛑 Đã hủy biểu mẫu kèo.", build_main_menu_keyboard())
+            await query.answer("Đã hủy.")
             return
-        title = "♻️ Đã cập nhật kèo" if updated else "📌 Đã thêm vào theo dõi"
-        await msg.answer(
-            format_watch_card(item, title=title),
-            reply_markup=build_watch_keyboard(item),
-        )
-        await query.answer("✅ Đã đưa vào danh sách theo dõi!")
+
+        if action == "back":
+            draft.editing_field = None
+            await state.set_state(DealFormStates.browsing)
+            await state.update_data(deal_draft=draft.model_dump())
+            await _safe_edit(msg, format_deal_form(draft), build_deal_form_keyboard(draft))
+            await query.answer()
+            return
+
+        if action == "field":
+            field = callback_data.field
+            prompt = FIELD_PROMPTS.get(field)
+            if not prompt:
+                await query.answer("Trường không hợp lệ.", show_alert=True)
+                return
+            draft.editing_field = field
+            await state.set_state(DealFormStates.waiting_for_field)
+            await state.update_data(deal_draft=draft.model_dump())
+            await _safe_edit(
+                msg,
+                f"{format_deal_form(draft)}\n\n👉 {prompt}",
+                build_field_prompt_keyboard(),
+            )
+            await query.answer()
+            return
+
+        if action == "save":
+            if not draft.uid:
+                await query.answer("⚠️ Vui lòng bấm '🆔 Nhập UID *' trước!", show_alert=True)
+                return
+
+            user_id = query.from_user.id if query.from_user else 0
+            try:
+                if draft.is_edit and draft.watch_id is not None:
+                    item = await watch_service.update_watch_details(
+                        msg.chat.id,
+                        draft.watch_id,
+                        note=draft.note,
+                        price=draft.price,
+                        faq=draft.faq,
+                    )
+                    title = "✏️ Đã cập nhật kèo"
+                else:
+                    note = draft.note or "Theo dõi nhanh"
+                    price = draft.price or "0"
+                    raw_line = f"{draft.uid} | {note} | {price}"
+                    if draft.faq:
+                        raw_line += f" | {draft.faq}"
+                    item, updated = await watch_service.upsert_watch(
+                        msg.chat.id,
+                        user_id,
+                        raw_line,
+                    )
+                    title = "♻️ Đã cập nhật kèo" if updated else "📌 Đã lên kèo thành công"
+            except ValueError as exc:
+                await query.answer(str(exc), show_alert=True)
+                return
+
+            await state.clear()
+            await _safe_edit(
+                msg,
+                format_watch_card(item, title=title),
+                build_watch_keyboard(item),
+            )
+            await query.answer("✅ Đã lưu kèo!")
+            return
+
+        await query.answer()
+
+    @router.callback_query(QuickWatchCallback.filter())
+    async def cb_quick_watch(
+        query: CallbackQuery,
+        callback_data: QuickWatchCallback,
+        state: FSMContext,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        await _open_deal_form(msg, state, DealDraft(uid=callback_data.uid), edit_existing=False)
+        await query.answer("📝 Đã mở Form lên kèo với UID sẵn!")
 
     @router.callback_query(ListPageCallback.filter())
     async def cb_list_page(query: CallbackQuery, callback_data: ListPageCallback) -> None:
@@ -462,7 +495,11 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await query.answer()
 
     @router.callback_query(WatchActionCallback.filter())
-    async def cb_watch_action(query: CallbackQuery, callback_data: WatchActionCallback) -> None:
+    async def cb_watch_action(
+        query: CallbackQuery,
+        callback_data: WatchActionCallback,
+        state: FSMContext,
+    ) -> None:
         msg = query.message
         if not isinstance(msg, Message):
             await query.answer()
@@ -470,6 +507,19 @@ def create_watch_router(watch_service: WatchService) -> Router:
         action = callback_data.action
         watch_id = callback_data.watch_id
         try:
+            if action == "edit":
+                existing = await watch_service.get_watch(msg.chat.id, watch_id)
+                draft = DealDraft(
+                    watch_id=existing.id,
+                    uid=existing.uid,
+                    note=existing.note,
+                    price=existing.price,
+                    faq=existing.faq,
+                    form_message_id=msg.message_id,
+                )
+                await _open_deal_form(msg, state, draft, edit_existing=True)
+                await query.answer("✏️ Chọn mục cần sửa.")
+                return
             if action == "delete":
                 deleted = await watch_service.delete_watch(msg.chat.id, watch_id)
                 await _safe_edit(
@@ -515,6 +565,25 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await query.answer(toast)
 
     return router
+
+
+async def _open_deal_form(
+    message: Message,
+    state: FSMContext,
+    draft: DealDraft,
+    *,
+    edit_existing: bool = False,
+) -> None:
+    text = format_deal_form(draft)
+    markup = build_deal_form_keyboard(draft)
+    if edit_existing:
+        await _safe_edit(message, text, markup)
+        draft.form_message_id = message.message_id
+    else:
+        sent = await message.answer(text, reply_markup=markup)
+        draft.form_message_id = sent.message_id
+    await state.set_state(DealFormStates.browsing)
+    await state.update_data(deal_draft=draft.model_dump())
 
 
 async def _handle_upsert_watch(message: Message, watch_service: WatchService, raw: str) -> None:

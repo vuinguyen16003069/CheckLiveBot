@@ -163,7 +163,7 @@ def build_dispatcher(
     dp.message.middleware(throttle)
     dp.callback_query.middleware(throttle)
 
-    dp.include_router(create_watch_router(watch_service))
+    dp.include_router(create_watch_router(watch_service, bulk_service=bulk_service))
     dp.include_router(create_bulk_router(bulk_service, watch_service=watch_service))
     return dp
 

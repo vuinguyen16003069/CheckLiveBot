@@ -289,6 +289,34 @@ class WatchService:
         item, _ = await self.upsert_watch(chat_id, user_id, raw_args)
         return item
 
+    async def get_watch(self, chat_id: int, watch_id: int) -> WatchItem:
+        return await self._require_owned(chat_id, watch_id)
+
+    async def update_watch_details(
+        self,
+        chat_id: int,
+        watch_id: int,
+        *,
+        note: str,
+        price: str,
+        faq: str,
+    ) -> WatchItem:
+        item = await self._require_owned(chat_id, watch_id)
+        item.note = note.strip() or "Theo dõi nhanh"
+        item.price = price.strip() or "0"
+        item.faq = faq.strip()
+        updated = await self._repo.update(item)
+        await self._repo.append_event(
+            WatchEvent(
+                watch_id=updated.id,
+                chat_id=chat_id,
+                uid=updated.uid,
+                event_type="UPDATED",
+                detail=f"{updated.note} | {updated.price}",
+            )
+        )
+        return updated
+
     async def delete_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         item = await self._require_owned(chat_id, watch_id)
         await self._repo.delete(item)

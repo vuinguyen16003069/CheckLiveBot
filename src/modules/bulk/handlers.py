@@ -19,8 +19,8 @@ from src.modules.bulk.domain import (
     format_single_check,
 )
 from src.modules.bulk.service import BulkCheckService
-from src.modules.watch.handlers import QuickWatchCallback
 from src.modules.watch.service import WatchService
+from src.modules.watch.ui import QuickWatchCallback, build_cancel_keyboard
 
 logger = structlog.get_logger(__name__)
 
@@ -77,7 +77,7 @@ def _quick_watch_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="➕ Theo dõi UID này",
+                    text="➕ Lên kèo UID này",
                     callback_data=QuickWatchCallback(uid=uid).pack(),
                 )
             ]
@@ -111,8 +111,8 @@ def create_bulk_router(
         await state.set_state(BulkStates.waiting_for_uids)
         await message.answer(
             "📦 <b>Chế độ Check hàng loạt (ARQ Worker)</b>\n\n"
-            "Gửi danh sách UID (mỗi dòng 1 UID) hoặc gửi trực tiếp file <code>.txt</code>.\n"
-            "Gõ /cancel để thoát."
+            "Gửi danh sách UID (mỗi dòng 1 UID) hoặc gửi trực tiếp file <code>.txt</code>.",
+            reply_markup=build_cancel_keyboard(),
         )
 
     @router.message(BulkStates.waiting_for_uids, F.text)
