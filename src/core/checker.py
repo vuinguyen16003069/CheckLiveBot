@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from itertools import cycle
 from typing import Any
 
 import structlog
@@ -12,33 +13,24 @@ from src.core.ports import CheckOutcome, UidCheckResult
 
 logger = structlog.get_logger(__name__)
 
-FB_GRAPH_PICTURE_URL = "https://graph.facebook.com/{uid}/picture?type=normal&redirect=false"
-_PLACEHOLDER_URL_MARKERS = ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
-
 
 class _RetryableCheckError(Exception):
-    """Raised on network errors, timeouts, 403/429, or 5xx to trigger retry + proxy rotation."""
+    pass
 
 
 class ProxyPool:
     def __init__(self, proxies: Sequence[str] | None = None) -> None:
-        self._proxies = [p.strip() for p in (proxies or []) if p.strip()]
-        self._cursor = 0
+        self._proxies = [p.strip() for p in proxies or [] if p.strip()]
+        self._iterator = cycle(self._proxies)
 
     def next_proxy(self) -> str | None:
-        if not self._proxies:
-            return None
-        proxy = self._proxies[self._cursor % len(self._proxies)]
-        self._cursor = (self._cursor + 1) % len(self._proxies)
-        return proxy
+        return next(self._iterator, None)
 
     def __len__(self) -> int:
         return len(self._proxies)
 
 
 class CurlCffiFacebookChecker:
-    """Single-method Facebook LIVE/DIE checker via Graph Picture JSON API (no HTML fallback)."""
-
     def __init__(
         self,
         *,
@@ -51,48 +43,51 @@ class CurlCffiFacebookChecker:
     ) -> None:
         self._timeout = timeout_seconds
         self._max_retries = max(1, max_retries)
+        self._verify_delay = max(0.0, verify_delay_seconds)
         self._proxy_pool = ProxyPool(proxies)
         self._owns_session = session is None
-        self._max_clients = max(10, max_clients)
-        self._session: AsyncSession = session or AsyncSession(
+        self._session = session or AsyncSession(
             impersonate="chrome",
-            max_clients=self._max_clients,
+            max_clients=max(10, max_clients),
         )
-        self._verify_delay = max(0.0, verify_delay_seconds)
+
+    async def __aenter__(self) -> CurlCffiFacebookChecker:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
 
     async def check(self, uid: str) -> UidCheckResult:
-        url = FB_GRAPH_PICTURE_URL.format(uid=uid)
-        last_error: Exception | None = None
+        url = f"https://graph.facebook.com/{uid}/picture?type=normal&redirect=false"
+        last_error: _RetryableCheckError | None = None
+
         for attempt in range(self._max_retries):
             try:
                 outcome, detail = await self._fetch_graph_once(url)
-                return UidCheckResult(
-                    uid=uid,
-                    outcome=outcome,
-                    checked_at=datetime.now(UTC),
-                    detail=detail,
-                )
             except _RetryableCheckError as exc:
                 last_error = exc
                 if attempt + 1 < self._max_retries:
-                    await asyncio.sleep(min(0.2 * (2**attempt), 1.0))
+                    await asyncio.sleep(min(0.2 * 2**attempt, 1.0))
             except Exception as exc:
                 logger.warning("fb_check_unexpected_error", uid=uid, error=str(exc))
-                return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(exc))
+                return self._result(uid, CheckOutcome.ERROR, str(exc))
+            else:
+                return self._result(uid, outcome, detail)
 
         logger.warning("fb_check_retry_exhausted", uid=uid, error=str(last_error))
-        return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(last_error))
+        return self._result(uid, CheckOutcome.ERROR, str(last_error))
 
     async def verify_live(self, uid: str) -> UidCheckResult:
-        """Layer-2 Graph API re-check after a short pause to prevent false DIE -> LIVE alerts."""
-        if self._verify_delay > 0:
-            await asyncio.sleep(self._verify_delay)
+        await asyncio.sleep(self._verify_delay)
         return await self.check(uid)
 
+    async def close(self) -> None:
+        if self._owns_session:
+            await self._session.close()
+
     async def _fetch_graph_once(self, url: str) -> tuple[CheckOutcome, str | None]:
-        proxy = self._proxy_pool.next_proxy()
         kwargs: dict[str, Any] = {"timeout": self._timeout}
-        if proxy:
+        if proxy := self._proxy_pool.next_proxy():
             kwargs["proxy"] = proxy
 
         try:
@@ -100,22 +95,39 @@ class CurlCffiFacebookChecker:
         except Exception as exc:
             raise _RetryableCheckError(f"request_failed: {exc}") from exc
 
-        status_code = int(response.status_code)
-        if status_code in (403, 429) or status_code >= 500:
-            raise _RetryableCheckError(f"http_{status_code}")
+        status = int(response.status_code)
+        if status in (403, 429) or status >= 500:
+            raise _RetryableCheckError(f"http_{status}")
 
         try:
             payload = response.json()
         except Exception as exc:
-            if status_code == 404:
+            if status == 404:
                 return CheckOutcome.DIE, "http_404"
-            raise _RetryableCheckError(f"invalid_json_http_{status_code}") from exc
+            raise _RetryableCheckError(f"invalid_json_http_{status}") from exc
 
-        return parse_graph_picture_payload(payload, status_code)
+        return parse_graph_picture_payload(payload, status)
 
-    async def close(self) -> None:
-        if self._owns_session:
-            await self._session.close()
+    @staticmethod
+    def _result(uid: str, outcome: CheckOutcome, detail: str | None) -> UidCheckResult:
+        return UidCheckResult(
+            uid=uid,
+            outcome=outcome,
+            checked_at=datetime.now(UTC),
+            detail=detail,
+        )
+
+
+def _has_valid_avatar(data: dict[str, Any]) -> bool:
+    height, width, url = data.get("height"), data.get("width"), data.get("url")
+    return (
+        isinstance(height, int)
+        and isinstance(width, int)
+        and height > 0
+        and width > 0
+        and isinstance(url, str)
+        and bool(url.strip())
+    )
 
 
 def parse_graph_picture_payload(
@@ -129,23 +141,16 @@ def parse_graph_picture_payload(
         return CheckOutcome.DIE, "graph_error"
 
     data = payload.get("data")
-    if isinstance(data, dict):
-        height = data.get("height")
-        width = data.get("width")
-        url = data.get("url")
-        is_silhouette = bool(data.get("is_silhouette", False))
-        if (
-            isinstance(height, int)
-            and isinstance(width, int)
-            and height > 0
-            and width > 0
-            and isinstance(url, str)
-            and bool(url.strip())
-        ):
-            lower_url = url.lower()
-            if is_silhouette and any(m in lower_url for m in _PLACEHOLDER_URL_MARKERS):
-                return CheckOutcome.DIE, "silhouette_placeholder"
-            return CheckOutcome.LIVE, None
+    if not isinstance(data, dict):
+        return CheckOutcome.DIE, f"no_data_http_{status_code}"
+
+    if not _has_valid_avatar(data):
         return CheckOutcome.DIE, "missing_avatar_dimensions"
 
-    return CheckOutcome.DIE, f"no_data_http_{status_code}"
+    if data.get("is_silhouette") and any(
+        marker in data["url"].lower()
+        for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
+    ):
+        return CheckOutcome.DIE, "silhouette_placeholder"
+
+    return CheckOutcome.LIVE, None
