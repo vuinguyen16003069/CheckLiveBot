@@ -525,39 +525,46 @@ def build_list_keyboard(
     total_pages: int,
     items: list[WatchItem] | None = None,
 ) -> InlineKeyboardMarkup:
-    filters = ["ALL", "DIE", "LIVE", "DONE", "CANCELLED"]
+    filters = [
+        ("ALL", "ALL"),
+        ("DIE", "DIE"),
+        ("LIVE", "LIVE"),
+        ("DONE", "DONE"),
+        ("CANCELLED", "HỦY"),
+    ]
     filter_row = [
         InlineKeyboardButton(
-            text=f"• {st} •" if st == status_filter else st,
-            callback_data=ListPageCallback(status=st, page=1).pack(),
+            text=f"•{label}•" if code == status_filter else label,
+            callback_data=ListPageCallback(status=code, page=1).pack(),
         )
-        for st in filters
+        for code, label in filters
     ]
-    nav_row: list[InlineKeyboardButton] = []
-    if page > 1:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="◀️ Trước",
-                callback_data=ListPageCallback(status=status_filter, page=page - 1).pack(),
-            )
-        )
-    nav_row.append(
-        InlineKeyboardButton(
-            text=f"📄 {page}/{total_pages}",
-            callback_data=ListPageCallback(status=status_filter, page=page).pack(),
-        )
-    )
-    if page < total_pages:
-        nav_row.append(
-            InlineKeyboardButton(
-                text="Sau ▶️",
-                callback_data=ListPageCallback(status=status_filter, page=page + 1).pack(),
-            )
-        )
-    rows: list[list[InlineKeyboardButton]] = [filter_row[:3], filter_row[3:]]
+    rows: list[list[InlineKeyboardButton]] = [filter_row]
     if items:
         rows.extend(_build_item_picker_rows(items, back_status=status_filter, back_page=page))
-    rows.append(nav_row)
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="◀️",
+                    callback_data=ListPageCallback(status=status_filter, page=page - 1).pack(),
+                )
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"📄 {page}/{total_pages}",
+                callback_data=ListPageCallback(status=status_filter, page=page).pack(),
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                InlineKeyboardButton(
+                    text="▶️",
+                    callback_data=ListPageCallback(status=status_filter, page=page + 1).pack(),
+                )
+            )
+        rows.append(nav_row)
     rows.append(
         [
             InlineKeyboardButton(
@@ -565,7 +572,7 @@ def build_list_keyboard(
                 callback_data=MenuCallback(action="recheck_all").pack(),
             ),
             InlineKeyboardButton(
-                text="🔙 Quay lại Menu",
+                text="🔙 Menu",
                 callback_data=MenuCallback(action="home").pack(),
             ),
         ]

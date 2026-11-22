@@ -224,8 +224,12 @@ def format_watch_list(
         uid_display = _spoiler(f"<code>{html.escape(item.uid)}</code>", item.is_hidden)
         note_display = _spoiler(html.escape(item.note), item.is_hidden)
         price_display = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
+        faq_part = f" | ⚠️ {_spoiler(html.escape(item.faq), item.is_hidden)}" if item.faq else ""
+        faq_part = (
+            f" | ⚠️ {_spoiler(html.escape(item.faq), item.is_hidden)}" if item.faq else ""
+        )
         rows.append(
-            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}"
+            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
         )
     return "\n".join(rows)
 
@@ -289,7 +293,11 @@ def format_search_results(query: str, items: list[WatchItem]) -> str:
         uid_display = _spoiler(f"<code>{html.escape(item.uid)}</code>", item.is_hidden)
         note_display = _spoiler(html.escape(item.note), item.is_hidden)
         price_display = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
+        faq_part = f" | ⚠️ {_spoiler(html.escape(item.faq), item.is_hidden)}" if item.faq else ""
+        faq_part = (
+            f" | ⚠️ {_spoiler(html.escape(item.faq), item.is_hidden)}" if item.faq else ""
+        )
         rows.append(
-            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}"
+            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
         )
     return "\n".join(rows)
