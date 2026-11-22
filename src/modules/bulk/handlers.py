@@ -6,11 +6,18 @@ from collections.abc import Sequence
 
 import structlog
 from aiogram import Bot, F, Router
+from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import (
@@ -20,14 +27,13 @@ from src.modules.bulk.domain import (
     format_single_check,
 )
 from src.modules.bulk.service import BulkCheckService
-from src.modules.watch.service import WatchService
-from src.modules.watch.ui import QuickWatchCallback, build_cancel_keyboard
+from src.modules.watch.ui import QuickWatchCallback
 
 logger = structlog.get_logger(__name__)
 
 
-class BulkStates(StatesGroup):
-    waiting_for_uids = State()
+class RecheckSingleCallback(CallbackData, prefix="rc"):
+    uid: str
 
 
 class TelegramBulkNotifier:
@@ -71,25 +77,26 @@ class TelegramBulkNotifier:
         await self._bot.send_document(chat_id=chat_id, document=doc, caption=caption)
 
 
-def _quick_watch_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup | None:
-    if outcome == CheckOutcome.LIVE:
-        return None
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Lên kèo UID này",
-                    callback_data=QuickWatchCallback(uid=uid).pack(),
-                )
-            ]
-        ]
+def build_single_check_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = []
+    if outcome != CheckOutcome.LIVE:
+        row.append(
+            InlineKeyboardButton(
+                text="➕ Lên kèo UID này",
+                callback_data=QuickWatchCallback(uid=uid).pack(),
+            )
+        )
+    row.append(
+        InlineKeyboardButton(
+            text="🔄 Check lại",
+            callback_data=RecheckSingleCallback(uid=uid).pack(),
+        )
     )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
-def create_bulk_router(
-    bulk_service: BulkCheckService,
-    watch_service: WatchService | None = None,
-) -> Router:
+def create_bulk_router(bulk_service: BulkCheckService) -> Router:
+    """Single unified check router: /check, paste 1 UID, paste multi-line UIDs, or send .txt."""
     router = Router(name="bulk")
 
     @router.message(Command("check"))
@@ -97,34 +104,34 @@ def create_bulk_router(
         raw = (command.args or "").strip()
         if not raw:
             await message.answer(
-                "🔎 Cú pháp: <code>/check &lt;UID hoặc link profile.php?id=...&gt;</code>\n"
-                "💡 Mẹo: Bạn cũng có thể dán thẳng UID vào chat mà không cần gõ /check!"
+                "🔎 <b>Kiểm tra nhanh LIVE / DIE</b>\n"
+                "• Dán thẳng <b>1 UID</b> hoặc <b>link FB</b> để check ngay.\n"
+                "• Dán <b>nhiều dòng UID</b> hoặc gửi file <code>.txt</code> để check hàng loạt.\n"
+                "• Hoặc gõ: <code>/check 20531316728</code>"
             )
             return
         await _reply_single_check(message, bulk_service, raw)
 
-    @router.message(Command("bulk"))
-    async def cmd_bulk(message: Message, command: CommandObject, state: FSMContext) -> None:
-        inline_text = (command.args or "").strip()
-        if inline_text:
-            await _enqueue_text(message, bulk_service, inline_text)
+    @router.callback_query(RecheckSingleCallback.filter())
+    async def cb_recheck_single(
+        query: CallbackQuery,
+        callback_data: RecheckSingleCallback,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
             return
-        await state.set_state(BulkStates.waiting_for_uids)
-        await message.answer(
-            "📦 <b>Check hàng loạt</b>\n\n"
-            "Gửi danh sách UID (mỗi dòng 1 UID) hoặc gửi trực tiếp file <code>.txt</code>.",
-            reply_markup=build_cancel_keyboard(),
-        )
-
-    @router.message(BulkStates.waiting_for_uids, F.text)
-    async def handle_bulk_text(message: Message, state: FSMContext) -> None:
-        text = (message.text or "").strip()
-        if text.lower() == "/cancel":
-            await state.clear()
-            await message.answer("🛑 Đã hủy chế độ kiểm tra hàng loạt.")
+        try:
+            uid, outcome = await bulk_service.check_single_uid(callback_data.uid)
+        except ValueError as exc:
+            await query.answer(str(exc), show_alert=True)
             return
-        await state.clear()
-        await _enqueue_text(message, bulk_service, text)
+        with contextlib.suppress(TelegramBadRequest):
+            await msg.edit_text(
+                format_single_check(uid, outcome),
+                reply_markup=build_single_check_markup(uid, outcome),
+            )
+        await query.answer(f"🔄 Kết quả mới nhất: {outcome.value}")
 
     @router.message(F.document)
     async def handle_txt_document(message: Message, bot: Bot, state: FSMContext) -> None:
@@ -138,40 +145,17 @@ def create_bulk_router(
             await message.answer("❌ File quá lớn (tối đa 10 MB).")
             return
 
-        current_state = await state.get_state()
-        if current_state is not None:
+        if await state.get_state() is not None:
             await state.clear()
 
         buf = io.BytesIO()
         await bot.download(document, destination=buf)
         text = buf.getvalue().decode("utf-8", errors="ignore")
-
-        # Smart detect: if lines look like watch rows ("UID | note | price"), import as watches
-        non_empty = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        if (
-            watch_service is not None
-            and non_empty
-            and all("|" in ln for ln in non_empty[:5])
-            and current_state != BulkStates.waiting_for_uids.state
-        ):
-            user_id = message.from_user.id if message.from_user else 0
-            added, dup_count, errors = await watch_service.add_watch_batch(
-                message.chat.id, user_id, text
-            )
-            lines = [
-                f"✅ Nhận diện file kèo — Thêm mới: <b>{len(added)}</b> | ⏭ Bỏ qua (trùng UID): <b>{dup_count}</b>."
-            ]
-            if errors:
-                lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
-                lines.extend(errors[:10])
-            await message.answer("\n".join(lines))
-            return
-
-        await _enqueue_text(message, bulk_service, text)
+        await _start_bulk(message, bulk_service, text)
 
     @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
     async def handle_smart_plain_text(message: Message) -> None:
-        """Smart UX: paste 1 UID/FB link to check immediately, or 2+ UIDs to bulk check."""
+        """Paste 1 UID/FB link to check immediately, or 2+ UIDs to bulk check."""
         text = (message.text or "").strip()
         if not text:
             return
@@ -182,7 +166,7 @@ def create_bulk_router(
         if "\n" in text:
             uids, _ = extract_uids_from_text(text, max_uids=50000)
             if len(uids) >= 2:
-                await _enqueue_text(message, bulk_service, text)
+                await _start_bulk(message, bulk_service, text)
 
     return router
 
@@ -192,35 +176,38 @@ async def _reply_single_check(
     bulk_service: BulkCheckService,
     raw: str,
 ) -> None:
+    if message.bot is not None:
+        with contextlib.suppress(Exception):
+            await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
     try:
-        uid, outcome, from_cache = await bulk_service.check_single_uid(raw)
+        uid, outcome = await bulk_service.check_single_uid(raw)
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
     await message.answer(
-        format_single_check(uid, outcome, from_cache),
-        reply_markup=_quick_watch_markup(uid, outcome),
+        format_single_check(uid, outcome),
+        reply_markup=build_single_check_markup(uid, outcome),
     )
 
 
-async def _enqueue_text(message: Message, bulk_service: BulkCheckService, text: str) -> None:
+async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: str) -> None:
+    if message.bot is None:
+        return
     status_msg = await message.answer("⏳ Đang tiếp nhận danh sách UID...")
     try:
-        job_id, total, skipped = await bulk_service.enqueue_bulk_text(
+        job_id, total, skipped = bulk_service.start_bulk_text(
             chat_id=message.chat.id,
             text=text,
             status_message_id=status_msg.message_id,
+            notifier=TelegramBulkNotifier(message.bot),
         )
     except ValueError as exc:
         await status_msg.edit_text(f"❌ {exc}")
-        return
-    except RuntimeError as exc:
-        await status_msg.edit_text(f"⚠️ {exc}")
         return
 
     extra = f" (đã lọc bỏ {skipped:,} dòng trùng/lỗi)" if skipped else ""
     await status_msg.edit_text(
         f"📥 <b>Đã nhận {total:,} UID</b>{extra}\n"
         f"🆔 Mã phiên: <code>#{job_id}</code>\n"
-        "⚙️ Bot đang kiểm tra ngầm và sẽ cập nhật tiến độ liên tục..."
+        "⚙️ Bot đang kiểm tra ngay và sẽ cập nhật tiến độ liên tục..."
     )

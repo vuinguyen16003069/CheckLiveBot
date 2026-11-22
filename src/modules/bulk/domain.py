@@ -19,7 +19,6 @@ class BulkSummary(BaseModel):
     live: int
     die: int
     error: int
-    cache_hits: int
     elapsed_seconds: float
 
 
@@ -77,14 +76,12 @@ def format_bulk_progress(
     live: int,
     die: int,
     error: int,
-    cache_hits: int,
 ) -> str:
     bar = render_progress_bar(done, total)
     return (
         f"⚙️ <b>Đang kiểm tra hàng loạt</b> (<code>#{html.escape(job_id)}</code>)\n\n"
         f"<code>{bar}</code> ({done:,}/{total:,})\n"
-        f"✅ LIVE: <b>{live:,}</b> | ❌ DIE: <b>{die:,}</b> | ⚠️ Lỗi: <b>{error:,}</b>\n"
-        f"⚡ Cache RAM: <b>{cache_hits:,}</b>"
+        f"✅ LIVE: <b>{live:,}</b> | ❌ DIE: <b>{die:,}</b> | ⚠️ Lỗi: <b>{error:,}</b>"
     )
 
 
@@ -95,34 +92,19 @@ def format_bulk_summary(summary: BulkSummary) -> str:
         f"• ✅ LIVE: <b>{summary.live:,}</b>\n"
         f"• ❌ DIE: <b>{summary.die:,}</b>\n"
         f"• ⚠️ ERROR: <b>{summary.error:,}</b>\n"
-        f"• ⚡ Cache RAM hit: <b>{summary.cache_hits:,}</b>\n"
         f"• ⏱ Thời gian: <b>{summary.elapsed_seconds:.1f}s</b>"
     )
 
 
-def format_single_check(uid: str, outcome: CheckOutcome, from_cache: bool) -> str:
+def format_single_check(uid: str, outcome: CheckOutcome) -> str:
     badge = {
         CheckOutcome.LIVE: "✅ <b>LIVE</b>",
         CheckOutcome.DIE: "❌ <b>DIE</b>",
         CheckOutcome.ERROR: "⚠️ <b>LỖI MẠNG / KHÔNG XÁC ĐỊNH</b>",
     }[outcome]
-    source = " (⚡ Cache RAM)" if from_cache else ""
-    return f"🔎 <b>Kiểm tra nhanh UID</b>\n🆔 <code>{html.escape(uid)}</code>\n📌 Trạng thái: {badge}{source}"
-
-
-def build_result_files(
-    live_uids: Sequence[str],
-    die_uids: Sequence[str],
-    error_uids: Sequence[str],
-) -> list[tuple[str, bytes]]:
-    files: list[tuple[str, bytes]] = []
-    if live_uids:
-        files.append(("live.txt", ("\n".join(live_uids) + "\n").encode("utf-8")))
-    if die_uids:
-        files.append(("die.txt", ("\n".join(die_uids) + "\n").encode("utf-8")))
-    if error_uids:
-        files.append(("error.txt", ("\n".join(error_uids) + "\n").encode("utf-8")))
-    return files
+    return (
+        f"🔎 <b>Kiểm tra nhanh UID</b>\n🆔 <code>{html.escape(uid)}</code>\n📌 Trạng thái: {badge}"
+    )
 
 
 def build_combined_result_file(

@@ -388,7 +388,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     settings = Settings()
-    r = create_redis_client(settings.effective_redis_url)
+    r = create_redis_client(settings.redis_url)
     try:
         if args.info:
             await show_db_capacity(r, settings.redis_key_prefix)

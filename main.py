@@ -4,14 +4,9 @@ import asyncio
 import contextlib
 
 from src.core.config import Settings, setup_logging
-from src.core.runtime import (
-    WorkerSettings,
-    build_webhook_app,
-    install_uvloop_if_available,
-    run_bot,
-)
+from src.core.runtime import install_uvloop_if_available, run_bot
 
-__all__ = ["WorkerSettings", "build_webhook_app", "main"]
+__all__ = ["main"]
 
 
 def main() -> None:

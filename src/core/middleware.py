@@ -1,18 +1,41 @@
 from __future__ import annotations
 
+import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-from src.core.ports import CachePort
-
 
 class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, cache: CachePort, limit_per_minute: int = 30) -> None:
-        self._cache = cache
+    """Zero-latency in-memory sliding-window rate limiter (0 Redis commands)."""
+
+    def __init__(self, limit_per_minute: int = 30) -> None:
         self._limit = limit_per_minute
+        self._windows: dict[int, deque[float]] = {}
+
+    def check_rate_limit(self, user_id: int) -> bool:
+        if self._limit <= 0:
+            return True
+        now = time.monotonic()
+        cutoff = now - 60.0
+        window = self._windows.get(user_id)
+        if window is None:
+            window = deque()
+            self._windows[user_id] = window
+        while window and window[0] <= cutoff:
+            window.popleft()
+        if len(window) >= self._limit:
+            return False
+        window.append(now)
+        # Opportunistically prune idle users when map grows large
+        if len(self._windows) > 2048:
+            stale = [uid for uid, w in self._windows.items() if not w or w[-1] <= cutoff]
+            for uid in stale:
+                del self._windows[uid]
+        return True
 
     async def __call__(
         self,
@@ -24,17 +47,13 @@ class ThrottlingMiddleware(BaseMiddleware):
         if isinstance(event, (Message, CallbackQuery)) and event.from_user:
             user_id = event.from_user.id
 
-        if user_id is not None and self._limit > 0:
-            allowed = await self._cache.check_rate_limit(user_id, self._limit)
-            if not allowed:
-                if isinstance(event, Message):
-                    await event.answer(
-                        "⏳ Bạn thao tác hơi nhanh, vui lòng chờ vài giây rồi thử lại."
-                    )
-                elif isinstance(event, CallbackQuery):
-                    await event.answer(
-                        "⏳ Thao tác quá nhanh, thử lại sau vài giây.",
-                        show_alert=False,
-                    )
-                return None
+        if user_id is not None and not self.check_rate_limit(user_id):
+            if isinstance(event, Message):
+                await event.answer("⏳ Bạn thao tác hơi nhanh, vui lòng chờ vài giây rồi thử lại.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer(
+                    "⏳ Thao tác quá nhanh, thử lại sau vài giây.",
+                    show_alert=False,
+                )
+            return None
         return await handler(event, data)

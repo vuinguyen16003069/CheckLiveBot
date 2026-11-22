@@ -3,15 +3,15 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Sequence
+from typing import Any
 
 import structlog
 
 from src.core.ports import (
     BulkNotifierPort,
-    CachePort,
     CheckOutcome,
     FacebookCheckerPort,
-    JobQueuePort,
 )
 from src.modules.bulk.domain import (
     BulkSummary,
@@ -25,91 +25,80 @@ logger = structlog.get_logger(__name__)
 
 
 class BulkCheckService:
+    """In-memory high-throughput bulk UID checker with bounded worker pool (0 Redis overhead)."""
+
     def __init__(
         self,
         *,
         checker: FacebookCheckerPort,
-        cache: CachePort,
-        queue: JobQueuePort | None,
-        concurrency: int = 50,
-        cache_ttl_seconds: int = 600,
+        concurrency: int = 100,
         max_bulk_uids: int = 50000,
-        progress_interval_seconds: float = 2.5,
+        progress_interval_seconds: float = 1.5,
     ) -> None:
         self._checker = checker
-        self._cache = cache
-        self._queue = queue
         self._concurrency = max(1, concurrency)
-        self._cache_ttl = max(0, cache_ttl_seconds)
         self._max_bulk_uids = max_bulk_uids
         self._progress_interval = max(0.5, progress_interval_seconds)
+        self._tasks: set[asyncio.Task[Any]] = set()
 
-    async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome, bool]:
+    async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
         uid = extract_uid(raw_uid)
         if not uid:
-            raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link profile.php?id=...).")
-
-        cached = await self._cache.get_cached_outcomes([uid])
-        if uid in cached:
-            return uid, cached[uid], True
+            raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link Facebook cá nhân).")
 
         result = await self._checker.check(uid)
-        await self._cache.set_cached_outcome(uid, result.outcome, self._cache_ttl)
-        return uid, result.outcome, False
+        return uid, result.outcome
 
-    async def enqueue_bulk_text(
+    def start_bulk_text(
         self,
+        *,
         chat_id: int,
         text: str,
         status_message_id: int,
+        notifier: BulkNotifierPort,
     ) -> tuple[str, int, int]:
-        if self._queue is None:
-            raise RuntimeError("ARQ job queue is not configured.")
-
         uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
         if not uids:
             raise ValueError("Không tìm thấy UID hợp lệ nào trong nội dung gửi lên.")
 
         job_id = uuid.uuid4().hex[:8]
-        await self._cache.save_bulk_payload(job_id, uids, ttl_seconds=3600)
-        await self._queue.enqueue_bulk_check(job_id, chat_id, status_message_id)
-        logger.info("bulk_job_enqueued", job_id=job_id, chat_id=chat_id, total=len(uids))
+
+        async def _runner() -> None:
+            try:
+                await self.run_bulk_uids(
+                    job_id=job_id,
+                    chat_id=chat_id,
+                    status_message_id=status_message_id,
+                    uids=uids,
+                    notifier=notifier,
+                )
+            except Exception as exc:
+                logger.exception("bulk_job_failed", job_id=job_id, error=str(exc))
+
+        task = asyncio.create_task(_runner(), name=f"bulk:{job_id}")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        logger.info("bulk_job_started", job_id=job_id, chat_id=chat_id, total=len(uids))
         return job_id, len(uids), skipped
 
-    async def run_bulk_job(
+    async def run_bulk_uids(
         self,
+        *,
         job_id: str,
         chat_id: int,
         status_message_id: int,
+        uids: Sequence[str],
         notifier: BulkNotifierPort,
-    ) -> BulkSummary | None:
-        uids = await self._cache.load_bulk_payload(job_id)
-        if not uids:
-            logger.warning("bulk_job_payload_missing", job_id=job_id, chat_id=chat_id)
-            return None
-
+    ) -> BulkSummary:
         started = time.monotonic()
         total = len(uids)
-        cached = await self._cache.get_cached_outcomes(uids)
-        cache_hits = len(cached)
 
         live_uids: list[str] = []
         die_uids: list[str] = []
         error_uids: list[str] = []
-        pending_uids: list[str] = []
 
-        for uid in uids:
-            outcome = cached.get(uid)
-            if outcome == CheckOutcome.LIVE:
-                live_uids.append(uid)
-            elif outcome == CheckOutcome.DIE:
-                die_uids.append(uid)
-            else:
-                pending_uids.append(uid)
-
-        done = cache_hits
+        done = 0
         last_update = 0.0
-        new_cache_entries: dict[str, CheckOutcome] = {}
 
         async def _maybe_update(force: bool = False) -> None:
             nonlocal last_update
@@ -123,41 +112,43 @@ class BulkCheckService:
                     live=len(live_uids),
                     die=len(die_uids),
                     error=len(error_uids),
-                    cache_hits=cache_hits,
                 )
                 await notifier.update_progress(chat_id, status_message_id, text)
 
         await _maybe_update(force=True)
 
-        sem = asyncio.Semaphore(self._concurrency)
+        uid_queue: asyncio.Queue[str] = asyncio.Queue()
+        for uid in uids:
+            uid_queue.put_nowait(uid)
 
-        async def _check_one(target_uid: str) -> tuple[str, CheckOutcome]:
-            async with sem:
-                res = await self._checker.check(target_uid)
-                return target_uid, res.outcome
+        async def _worker() -> None:
+            nonlocal done
+            while True:
+                try:
+                    target_uid = uid_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    res = await self._checker.check(target_uid)
+                    if res.outcome == CheckOutcome.LIVE:
+                        live_uids.append(target_uid)
+                    elif res.outcome == CheckOutcome.DIE:
+                        die_uids.append(target_uid)
+                    else:
+                        error_uids.append(target_uid)
+                    done += 1
+                    await _maybe_update(force=False)
+                finally:
+                    uid_queue.task_done()
 
-        tasks = [asyncio.create_task(_check_one(uid)) for uid in pending_uids]
+        worker_count = min(self._concurrency, total)
+        workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
         try:
-            for coro in asyncio.as_completed(tasks):
-                uid, outcome = await coro
-                if outcome == CheckOutcome.LIVE:
-                    live_uids.append(uid)
-                    new_cache_entries[uid] = outcome
-                elif outcome == CheckOutcome.DIE:
-                    die_uids.append(uid)
-                    new_cache_entries[uid] = outcome
-                else:
-                    error_uids.append(uid)
-                done += 1
-                await _maybe_update(force=False)
+            await asyncio.gather(*workers)
         finally:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-
-        if new_cache_entries:
-            await self._cache.set_cached_outcomes(new_cache_entries, self._cache_ttl)
-        await self._cache.delete_bulk_payload(job_id)
+            for w in workers:
+                if not w.done():
+                    w.cancel()
 
         elapsed = time.monotonic() - started
         summary = BulkSummary(
@@ -166,7 +157,6 @@ class BulkCheckService:
             live=len(live_uids),
             die=len(die_uids),
             error=len(error_uids),
-            cache_hits=cache_hits,
             elapsed_seconds=elapsed,
         )
 
@@ -188,7 +178,13 @@ class BulkCheckService:
             live=summary.live,
             die=summary.die,
             error=summary.error,
-            cache_hits=cache_hits,
             elapsed=round(elapsed, 2),
         )
         return summary
+
+    async def close(self) -> None:
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()

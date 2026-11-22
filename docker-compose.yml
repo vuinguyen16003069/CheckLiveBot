@@ -27,20 +27,5 @@ services:
       - "${PORT:-8080}:8080"
     restart: unless-stopped
 
-  worker:
-    build: .
-    profiles: ["scale"]
-    command: ["arq", "main.WorkerSettings"]
-    env_file:
-      - .env
-    environment:
-      REDIS_URL: redis://redis:6379/0
-      RUN_INLINE_WORKER: "false"
-      LOG_FORMAT: json
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
 volumes:
   redis_data:

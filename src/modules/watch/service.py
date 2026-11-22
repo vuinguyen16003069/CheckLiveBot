@@ -8,9 +8,8 @@ from typing import Protocol
 import structlog
 from redis.asyncio import Redis
 
-from src.core.ports import CachePort, CheckOutcome, FacebookCheckerPort
+from src.core.ports import CheckOutcome, FacebookCheckerPort, LockPort
 from src.modules.watch.domain import (
-    WatchEvent,
     WatchItem,
     WatchStats,
     WatchStatus,
@@ -79,32 +78,16 @@ class RedisWatchRepository:
             if status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(watch_id))
             await pipe.execute()
-
-        await self.append_event(
-            WatchEvent(
-                watch_id=watch_id,
-                chat_id=chat_id,
-                uid=uid,
-                event_type="CREATED",
-                detail=status.value,
-            )
-        )
         return item
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
         raw_id = await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
-        if raw_id:
-            item = await self.get(int(raw_id))
-            if item is not None and item.chat_id == chat_id and item.uid == uid:
-                return item
-            await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
-
-        # Backfill check for older watches created before chat_uid index existed
-        items, _, _ = await self.list_chat_items(chat_id, page=1, page_size=500)
-        for item in items:
-            if item.uid == uid:
-                await self._redis.hset(self._k(f"chat_uid:{chat_id}"), uid, str(item.id))  # type: ignore[misc]
-                return item
+        if not raw_id:
+            return None
+        item = await self.get(int(raw_id))
+        if item is not None and item.chat_id == chat_id and item.uid == uid:
+            return item
+        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
         return None
 
     async def get(self, watch_id: int) -> WatchItem | None:
@@ -150,15 +133,6 @@ class RedisWatchRepository:
             pipe.srem(self._k("watches:die"), str(item.id))
             pipe.hdel(self._k(f"chat_uid:{item.chat_id}"), item.uid)
             await pipe.execute()
-        await self.append_event(
-            WatchEvent(
-                watch_id=item.id,
-                chat_id=item.chat_id,
-                uid=item.uid,
-                event_type="DELETED",
-                detail=item.status.value,
-            )
-        )
 
     async def count_active_die(self, chat_id: int) -> int:
         return int(await self._redis.zcard(self._k(f"watches:chat:{chat_id}:status:DIE")))
@@ -183,7 +157,7 @@ class RedisWatchRepository:
         *,
         status_filter: WatchStatus | None = None,
         page: int = 1,
-        page_size: int = 8,
+        page_size: int = 10,
     ) -> tuple[list[WatchItem], int, int]:
         key = (
             self._k(f"watches:chat:{chat_id}:status:{status_filter.value}")
@@ -218,17 +192,6 @@ class RedisWatchRepository:
             cancelled=int(cancelled),
         )
 
-    async def append_event(self, event: WatchEvent) -> None:
-        key = self._k(f"events:chat:{event.chat_id}")
-        async with self._redis.pipeline(transaction=False) as pipe:
-            pipe.lpush(key, event.model_dump_json())
-            pipe.ltrim(key, 0, 99)
-            await pipe.execute()
-
-    async def list_events(self, chat_id: int, limit: int = 10) -> list[WatchEvent]:
-        raws = await self._redis.lrange(self._k(f"events:chat:{chat_id}"), 0, max(0, limit - 1))  # type: ignore[misc]
-        return [WatchEvent.model_validate_json(raw) for raw in raws]
-
 
 class WatchService:
     def __init__(
@@ -236,15 +199,11 @@ class WatchService:
         *,
         repo: RedisWatchRepository,
         checker: FacebookCheckerPort,
-        cache: CachePort,
-        cache_ttl_seconds: int = 600,
         max_active_per_chat: int = 100,
         concurrency: int = 20,
     ) -> None:
         self._repo = repo
         self._checker = checker
-        self._cache = cache
-        self._cache_ttl = cache_ttl_seconds
         self._max_active_per_chat = max_active_per_chat
         self._concurrency = max(1, concurrency)
 
@@ -254,26 +213,26 @@ class WatchService:
     async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
         parsed = parse_add_line(raw_args)
 
-        existing = await self._repo.find_by_uid(chat_id, parsed.uid)
+        async def _count_die() -> int:
+            if self._max_active_per_chat > 0:
+                return await self._repo.count_active_die(chat_id)
+            return 0
+
+        # Run Redis pre-checks and live Facebook check concurrently to cut latency
+        existing, active_count, res = await asyncio.gather(
+            self._repo.find_by_uid(chat_id, parsed.uid),
+            _count_die(),
+            self._checker.check(parsed.uid),
+        )
         if existing is not None:
             raise DuplicateWatchError(existing)
 
-        if self._max_active_per_chat > 0:
-            active_count = await self._repo.count_active_die(chat_id)
-            if active_count >= self._max_active_per_chat:
-                raise ValueError(
-                    f"Chat đã đạt giới hạn {self._max_active_per_chat} kèo DIE đang theo dõi."
-                )
+        if self._max_active_per_chat > 0 and active_count >= self._max_active_per_chat:
+            raise ValueError(
+                f"Chat đã đạt giới hạn {self._max_active_per_chat} kèo DIE đang theo dõi."
+            )
 
-        cached = await self._cache.get_cached_outcomes([parsed.uid])
-        if parsed.uid in cached:
-            outcome = cached[parsed.uid]
-        else:
-            res = await self._checker.check(parsed.uid)
-            outcome = res.outcome
-            await self._cache.set_cached_outcome(parsed.uid, outcome, self._cache_ttl)
-
-        initial_status = WatchStatus.LIVE if outcome == CheckOutcome.LIVE else WatchStatus.DIE
+        initial_status = WatchStatus.LIVE if res.outcome == CheckOutcome.LIVE else WatchStatus.DIE
         return await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
@@ -284,79 +243,13 @@ class WatchService:
             status=initial_status,
         )
 
-    async def upsert_watch(
-        self, chat_id: int, user_id: int, raw_args: str
-    ) -> tuple[WatchItem, bool]:
-        return await self.add_watch(chat_id, user_id, raw_args), False
-
     async def get_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         return await self._require_owned(chat_id, watch_id)
-
-    async def update_watch_details(
-        self,
-        chat_id: int,
-        watch_id: int,
-        *,
-        note: str,
-        price: str,
-        faq: str,
-    ) -> WatchItem:
-        item = await self._require_owned(chat_id, watch_id)
-        item.note = note.strip() or "Theo dõi nhanh"
-        item.price = price.strip() or "0"
-        item.faq = faq.strip()
-        updated = await self._repo.update(item)
-        await self._repo.append_event(
-            WatchEvent(
-                watch_id=updated.id,
-                chat_id=chat_id,
-                uid=updated.uid,
-                event_type="UPDATED",
-                detail=f"{updated.note} | {updated.price}",
-            )
-        )
-        return updated
 
     async def delete_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         item = await self._require_owned(chat_id, watch_id)
         await self._repo.delete(item)
         return item
-
-    async def search_watches(self, chat_id: int, query: str) -> list[WatchItem]:
-        needle = query.strip().lower()
-        if not needle:
-            return []
-        items, _, _ = await self._repo.list_chat_items(chat_id, page=1, page_size=500)
-        return [
-            item
-            for item in items
-            if needle in item.uid.lower()
-            or needle in item.note.lower()
-            or needle in item.price.lower()
-            or needle in item.faq.lower()
-            or needle == f"#{item.id}"
-            or needle == str(item.id)
-        ]
-
-    async def add_watch_batch(
-        self,
-        chat_id: int,
-        user_id: int,
-        raw_text: str,
-    ) -> tuple[list[WatchItem], int, list[str]]:
-        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        added: list[WatchItem] = []
-        duplicate_count = 0
-        errors: list[str] = []
-        for idx, line in enumerate(lines, start=1):
-            try:
-                item = await self.add_watch(chat_id, user_id, line)
-                added.append(item)
-            except DuplicateWatchError:
-                duplicate_count += 1
-            except ValueError as exc:
-                errors.append(f"Dòng {idx}: {exc}")
-        return added, duplicate_count, errors
 
     async def list_watches(
         self,
@@ -374,9 +267,6 @@ class WatchService:
 
     async def get_stats(self, chat_id: int) -> WatchStats:
         return await self._repo.get_stats(chat_id)
-
-    async def get_history(self, chat_id: int, limit: int = 10) -> list[WatchEvent]:
-        return await self._repo.list_events(chat_id, limit=limit)
 
     async def recheck_chat(
         self,
@@ -403,23 +293,12 @@ class WatchService:
                 now = datetime.now(UTC)
                 item.last_checked_at = now
                 if res.outcome == CheckOutcome.LIVE:
+                    verified = await self._checker.verify_live(item.uid)
+                    if verified.outcome != CheckOutcome.LIVE:
+                        return
                     item.status = WatchStatus.LIVE
                     item.live_detected_at = now
                     await self._repo.update(item, previous_status=WatchStatus.DIE)
-                    await self._cache.set_cached_outcome(
-                        item.uid,
-                        CheckOutcome.LIVE,
-                        self._cache_ttl,
-                    )
-                    await self._repo.append_event(
-                        WatchEvent(
-                            watch_id=item.id,
-                            chat_id=item.chat_id,
-                            uid=item.uid,
-                            event_type="LIVE_DETECTED",
-                            detail="recheck",
-                        )
-                    )
                     turned_live.append(item)
                 elif res.outcome == CheckOutcome.DIE:
                     await self._repo.update(item)
@@ -453,17 +332,7 @@ class WatchService:
         elif new_status == WatchStatus.DIE:
             item.live_detected_at = None
             item.completed_at = None
-        await self._repo.update(item, previous_status=prev)
-        await self._repo.append_event(
-            WatchEvent(
-                watch_id=item.id,
-                chat_id=item.chat_id,
-                uid=item.uid,
-                event_type=new_status.value,
-                detail=f"{prev.value}->{new_status.value}",
-            )
-        )
-        return item
+        return await self._repo.update(item, previous_status=prev)
 
     async def recheck_one(self, chat_id: int, watch_id: int) -> tuple[WatchItem, CheckOutcome]:
         item = await self._require_owned(chat_id, watch_id)
@@ -472,20 +341,14 @@ class WatchService:
         item.last_checked_at = now
         prev = item.status
         if res.outcome == CheckOutcome.LIVE and item.status == WatchStatus.DIE:
+            verified = await self._checker.verify_live(item.uid)
+            if verified.outcome != CheckOutcome.LIVE:
+                return item, verified.outcome
             item.status = WatchStatus.LIVE
             item.live_detected_at = now
             await self._repo.update(item, previous_status=prev)
-            await self._repo.append_event(
-                WatchEvent(
-                    watch_id=item.id,
-                    chat_id=item.chat_id,
-                    uid=item.uid,
-                    event_type="LIVE_DETECTED",
-                    detail="manual_button",
-                )
-            )
-        else:
-            await self._repo.update(item)
+            return item, CheckOutcome.LIVE
+        await self._repo.update(item)
         return item, res.outcome
 
 
@@ -495,60 +358,69 @@ class WatcherScanService:
         *,
         repo: RedisWatchRepository,
         checker: FacebookCheckerPort,
-        cache: CachePort,
+        lock: LockPort,
         notifier: WatchNotifierPort,
         concurrency: int = 50,
-        cache_ttl_seconds: int = 600,
     ) -> None:
         self._repo = repo
         self._checker = checker
-        self._cache = cache
+        self._lock = lock
         self._notifier = notifier
         self._concurrency = max(1, concurrency)
-        self._cache_ttl = cache_ttl_seconds
 
     async def scan_once(self) -> int:
         items = await self._repo.list_die_items()
         if not items:
             return 0
 
+        # Deduplicate by UID so multiple chats watching the same UID only trigger 1 check
+        grouped: dict[str, list[WatchItem]] = {}
+        for item in items:
+            grouped.setdefault(item.uid, []).append(item)
+
         sem = asyncio.Semaphore(self._concurrency)
 
-        async def _scan_item(item: WatchItem) -> bool:
+        async def _scan_uid(uid: str, uid_items: list[WatchItem]) -> int:
             async with sem:
-                res = await self._checker.check(item.uid)
-                if res.outcome == CheckOutcome.ERROR:
-                    return False
+                res = await self._checker.check(uid)
+                if res.outcome != CheckOutcome.LIVE:
+                    # Skip redundant Redis writes when item is still DIE or ERROR
+                    return 0
+
+                # Layer-2 double verification to guarantee 0% false LIVE alerts
+                verified = await self._checker.verify_live(uid)
+                if verified.outcome != CheckOutcome.LIVE:
+                    logger.info(
+                        "watcher_double_verify_rejected",
+                        uid=uid,
+                        watch_ids=[it.id for it in uid_items],
+                        second_outcome=verified.outcome.value,
+                    )
+                    return 0
+
                 now = datetime.now(UTC)
-                item.last_checked_at = now
-                if res.outcome == CheckOutcome.LIVE:
-                    locked = await self._cache.acquire_lock(f"notify:{item.id}", ttl_seconds=300)
+                count = 0
+                for item in uid_items:
+                    locked = await self._lock.acquire_lock(f"notify:{item.id}", ttl_seconds=300)
                     if not locked:
-                        return False
+                        continue
+                    item.last_checked_at = now
                     item.status = WatchStatus.LIVE
                     item.live_detected_at = now
                     await self._repo.update(item, previous_status=WatchStatus.DIE)
-                    await self._cache.set_cached_outcome(
-                        item.uid,
-                        CheckOutcome.LIVE,
-                        self._cache_ttl,
-                    )
-                    await self._repo.append_event(
-                        WatchEvent(
-                            watch_id=item.id,
-                            chat_id=item.chat_id,
-                            uid=item.uid,
-                            event_type="LIVE_DETECTED",
-                            detail="cron",
-                        )
-                    )
                     await self._notifier.notify_live(item)
-                    return True
-                await self._repo.update(item)
-                return False
+                    count += 1
+                return count
 
-        results = await asyncio.gather(*(_scan_item(i) for i in items))
-        notified = sum(1 for ok in results if ok)
+        results = await asyncio.gather(
+            *(_scan_uid(uid, uid_items) for uid, uid_items in grouped.items())
+        )
+        notified = sum(results)
         if notified > 0:
-            logger.info("watcher_scan_notified", count=notified, scanned=len(items))
+            logger.info(
+                "watcher_scan_notified",
+                count=notified,
+                scanned=len(items),
+                unique_uids=len(grouped),
+            )
         return notified

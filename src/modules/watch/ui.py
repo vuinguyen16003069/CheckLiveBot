@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import re
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.state import State, StatesGroup
@@ -28,36 +29,13 @@ class WizardStates(StatesGroup):
     waiting_faq = State()
 
 
-class DealFormStates(StatesGroup):
-    browsing = State()
-    waiting_for_field = State()
-
-
-class AddListStates(StatesGroup):
-    waiting_for_lines = State()
-
-
-class SearchStates(StatesGroup):
-    waiting_for_query = State()
-
-
-class CheckOneStates(StatesGroup):
-    waiting_for_uid = State()
-
-
-class MenuCallback(CallbackData, prefix="m"):
-    action: str
+class RecheckAllCallback(CallbackData, prefix="ra"):
+    pass
 
 
 class WatchActionCallback(CallbackData, prefix="w"):
     action: str
     watch_id: int
-
-
-class OpenWatchCallback(CallbackData, prefix="ow"):
-    watch_id: int
-    back_status: str = "ALL"
-    back_page: int = 1
 
 
 class QuickWatchCallback(CallbackData, prefix="qw"):
@@ -69,40 +47,17 @@ class ListPageCallback(CallbackData, prefix="lp"):
     page: int
 
 
-class DealFormCallback(CallbackData, prefix="df"):
-    action: str
-    field: str = ""
-
-
 class WizardCallback(CallbackData, prefix="wz"):
     action: str
     value: str = ""
 
 
 class DealDraft(BaseModel):
-    watch_id: int | None = None
     uid: str = ""
     note: str = ""
     price: str = ""
     faq: str = ""
-    form_message_id: int | None = None
     wizard_message_id: int | None = None
-    editing_field: str | None = None
-
-    @property
-    def is_edit(self) -> bool:
-        return self.watch_id is not None
-
-
-FIELD_PROMPTS: dict[str, str] = {
-    "uid": (
-        "🆔 Vui lòng gửi <b>UID</b> hoặc <b>link Facebook</b> "
-        "(VD: <code>100012345678901</code> hoặc <code>https://facebook.com/profile.php?id=...</code>):"
-    ),
-    "note": "📝 Vui lòng gửi <b>ghi chú</b> cho kèo (VD: <code>Khách VIP A</code>):",
-    "price": "💰 Vui lòng gửi <b>giá kèo</b> (VD: <code>50k</code>, <code>150.000</code>):",
-    "faq": "❓ Vui lòng gửi <b>FAQ / lưu ý thêm</b> (gửi <code>-</code> để xóa trắng):",
-}
 
 
 def build_reply_keyboard() -> ReplyKeyboardMarkup:
@@ -113,118 +68,6 @@ def build_reply_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         is_persistent=True,
-    )
-
-
-def format_deal_form(draft: DealDraft) -> str:
-    header = (
-        f"✏️ <b>SỬA KÈO #{draft.watch_id}</b> (Bấm từng nút bên dưới để sửa)\n"
-        if draft.is_edit
-        else "📝 <b>LÊN KÈO MỚI</b> (Bấm từng nút bên dưới để nhập)\n"
-    )
-    uid_val = (
-        f"<code>{html.escape(draft.uid)}</code> ✅"
-        if draft.uid
-        else "<i>(chưa nhập — bắt buộc)</i>"
-    )
-    note_val = (
-        f"{html.escape(draft.note)} ✅"
-        if draft.note
-        else "<i>(chưa nhập — mặc định: Theo dõi nhanh)</i>"
-    )
-    price_val = (
-        f"{html.escape(draft.price)} ✅" if draft.price else "<i>(chưa nhập — mặc định: 0)</i>"
-    )
-    faq_val = f"{html.escape(draft.faq)} ✅" if draft.faq else "<i>(tùy chọn)</i>"
-    return (
-        f"{header}\n"
-        f"🆔 UID: {uid_val}\n"
-        f"📝 Ghi chú: {note_val}\n"
-        f"💰 Giá: {price_val}\n"
-        f"❓ FAQ: {faq_val}"
-    )
-
-
-def build_deal_form_keyboard(draft: DealDraft) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if draft.is_edit:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="📝 Sửa ghi chú",
-                    callback_data=DealFormCallback(action="field", field="note").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="💰 Sửa giá",
-                    callback_data=DealFormCallback(action="field", field="price").pack(),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="❓ Sửa FAQ",
-                    callback_data=DealFormCallback(action="field", field="faq").pack(),
-                )
-            ]
-        )
-        confirm_text = "💾 Lưu thay đổi"
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🆔 Nhập UID *",
-                    callback_data=DealFormCallback(action="field", field="uid").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📝 Nhập ghi chú",
-                    callback_data=DealFormCallback(action="field", field="note").pack(),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="💰 Nhập giá",
-                    callback_data=DealFormCallback(action="field", field="price").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="❓ Nhập FAQ",
-                    callback_data=DealFormCallback(action="field", field="faq").pack(),
-                ),
-            ]
-        )
-        confirm_text = "✅ Xác nhận lên kèo"
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text=confirm_text,
-                callback_data=DealFormCallback(action="save").pack(),
-            ),
-            InlineKeyboardButton(
-                text="❌ Hủy",
-                callback_data=DealFormCallback(action="cancel").pack(),
-            ),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_field_prompt_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🔙 Quay lại Form",
-                    callback_data=DealFormCallback(action="back").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="❌ Hủy",
-                    callback_data=DealFormCallback(action="cancel").pack(),
-                ),
-            ]
-        ]
     )
 
 
@@ -292,7 +135,7 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
         summary.append(f"💰 Giá: {html.escape(draft.price)}")
 
     prompts = {
-        1: "🆔 <b>Bước 1/4 — Nhập UID</b> (hoặc dán link <code>profile.php?id=...</code>):",
+        1: "🆔 <b>Bước 1/4 — Nhập UID</b> (hoặc dán link Facebook):",
         2: "📝 <b>Bước 2/4 — Nhập ghi chú</b> cho kèo (VD: <code>Kèo 1</code>):",
         3: "💰 <b>Bước 3/4 — Chọn nhanh giá bên dưới</b> hoặc gõ giá bất kỳ:",
         4: "❓ <b>Bước 4/4 — Chọn nhanh FAQ bên dưới</b>, gõ lưu ý, hoặc bấm <b>Bỏ qua</b>:",
@@ -302,85 +145,21 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
     return f"{header}\n{body}\n👉 {prompts[step]}"
 
 
-def build_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Hủy",
-                    callback_data=MenuCallback(action="cancel_fsm").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🔙 Menu chính",
-                    callback_data=MenuCallback(action="home").pack(),
-                ),
-            ]
-        ]
-    )
+_WIZARD_UID_RE = re.compile(r"UID:\s*([A-Za-z0-9._-]{5,50})")
+_WIZARD_NOTE_RE = re.compile(r"Ghi chú:\s*(.+)")
+_WIZARD_PRICE_RE = re.compile(r"Giá:\s*(.+)")
 
 
-def build_back_menu_keyboard(refresh_action: str | None = None) -> InlineKeyboardMarkup:
-    row: list[InlineKeyboardButton] = []
-    if refresh_action:
-        row.append(
-            InlineKeyboardButton(
-                text="🔄 Làm mới",
-                callback_data=MenuCallback(action=refresh_action).pack(),
-            )
-        )
-    row.append(
-        InlineKeyboardButton(
-            text="🔙 Quay lại Menu",
-            callback_data=MenuCallback(action="home").pack(),
-        )
-    )
-    return InlineKeyboardMarkup(inline_keyboard=[row])
-
-
-def build_main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Lên kèo",
-                    callback_data=MenuCallback(action="add").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📥 Thêm nhiều kèo",
-                    callback_data=MenuCallback(action="addlist").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔎 Check 1 UID",
-                    callback_data=MenuCallback(action="check_one").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📦 Check hàng loạt",
-                    callback_data=MenuCallback(action="bulk").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Danh sách kèo",
-                    callback_data=ListPageCallback(status="ALL", page=1).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🔍 Tìm kèo",
-                    callback_data=MenuCallback(action="find").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📊 Thống kê",
-                    callback_data=MenuCallback(action="stats").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📜 Lịch sử",
-                    callback_data=MenuCallback(action="history").pack(),
-                ),
-            ],
-        ]
+def recover_draft_from_text(text: str | None) -> DealDraft:
+    if not text:
+        return DealDraft()
+    uid_m = _WIZARD_UID_RE.search(text)
+    note_m = _WIZARD_NOTE_RE.search(text)
+    price_m = _WIZARD_PRICE_RE.search(text)
+    return DealDraft(
+        uid=uid_m.group(1).strip() if uid_m else "",
+        note=note_m.group(1).strip() if note_m else "",
+        price=price_m.group(1).strip() if price_m else "",
     )
 
 
@@ -410,14 +189,6 @@ def build_watch_keyboard(
                     callback_data=WatchActionCallback(action="recheck", watch_id=item.id).pack(),
                 ),
                 InlineKeyboardButton(
-                    text="✏️ Sửa kèo",
-                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
                     text="❌ Hủy kèo",
                     callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
                 ),
@@ -445,14 +216,6 @@ def build_watch_keyboard(
                 InlineKeyboardButton(
                     text="✅ Tiếp tục theo dõi",
                     callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="✏️ Sửa kèo",
-                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
                 ),
                 InlineKeyboardButton(
                     text="🗑 Xóa",
@@ -496,34 +259,10 @@ def build_delete_confirm_keyboard(watch_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def _build_item_picker_rows(
-    items: list[WatchItem],
-    *,
-    back_status: str = "ALL",
-    back_page: int = 1,
-) -> list[list[InlineKeyboardButton]]:
-    rows: list[list[InlineKeyboardButton]] = []
-    buttons = [
-        InlineKeyboardButton(
-            text=f"#{item.id}",
-            callback_data=OpenWatchCallback(
-                watch_id=item.id,
-                back_status=back_status,
-                back_page=back_page,
-            ).pack(),
-        )
-        for item in items[:8]
-    ]
-    for idx in range(0, len(buttons), 4):
-        rows.append(buttons[idx : idx + 4])
-    return rows
-
-
 def build_list_keyboard(
     status_filter: str,
     page: int,
     total_pages: int,
-    items: list[WatchItem] | None = None,
 ) -> InlineKeyboardMarkup:
     filters = [
         ("ALL", "ALL"),
@@ -567,25 +306,8 @@ def build_list_keyboard(
         [
             InlineKeyboardButton(
                 text="🔄 Quét lại DIE",
-                callback_data=MenuCallback(action="recheck_all").pack(),
+                callback_data=RecheckAllCallback().pack(),
             ),
-            InlineKeyboardButton(
-                text="🔙 Menu",
-                callback_data=MenuCallback(action="home").pack(),
-            ),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_search_results_keyboard(items: list[WatchItem]) -> InlineKeyboardMarkup:
-    rows = _build_item_picker_rows(items, back_status="ALL", back_page=1)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔙 Quay lại Menu",
-                callback_data=MenuCallback(action="home").pack(),
-            )
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

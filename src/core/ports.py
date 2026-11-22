@@ -23,38 +23,12 @@ class UidCheckResult(BaseModel):
 
 class FacebookCheckerPort(Protocol):
     async def check(self, uid: str) -> UidCheckResult: ...
+    async def verify_live(self, uid: str) -> UidCheckResult: ...
     async def close(self) -> None: ...
 
 
-class CachePort(Protocol):
-    async def get_cached_outcomes(self, uids: Sequence[str]) -> dict[str, CheckOutcome]: ...
-    async def set_cached_outcome(
-        self, uid: str, outcome: CheckOutcome, ttl_seconds: int
-    ) -> None: ...
-    async def set_cached_outcomes(
-        self,
-        outcomes: dict[str, CheckOutcome],
-        ttl_seconds: int,
-    ) -> None: ...
+class LockPort(Protocol):
     async def acquire_lock(self, key: str, ttl_seconds: int) -> bool: ...
-    async def check_rate_limit(self, user_id: int, limit_per_minute: int) -> bool: ...
-    async def save_bulk_payload(
-        self,
-        job_id: str,
-        uids: Sequence[str],
-        ttl_seconds: int = 3600,
-    ) -> None: ...
-    async def load_bulk_payload(self, job_id: str) -> list[str]: ...
-    async def delete_bulk_payload(self, job_id: str) -> None: ...
-
-
-class JobQueuePort(Protocol):
-    async def enqueue_bulk_check(
-        self,
-        job_id: str,
-        chat_id: int,
-        status_message_id: int,
-    ) -> None: ...
 
 
 class BulkNotifierPort(Protocol):
