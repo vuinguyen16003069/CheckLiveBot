@@ -682,7 +682,7 @@ async def _finalize_wizard(
         await message.answer(f"❌ {exc}", reply_markup=build_main_menu_keyboard())
         return
 
-    title = "♻️ Đã cập nhật kèo" if updated else "📌 Đã lên kèo thành công"
+    title = "♻️ Đã cập nhật UID thành công!" if updated else "✅ Đã thêm UID thành công!"
     text = format_watch_card(item, title=title)
     markup = build_watch_keyboard(item)
     if edit_existing:
@@ -717,7 +717,7 @@ async def _handle_upsert_watch(message: Message, watch_service: WatchService, ra
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
-    title = "♻️ Đã cập nhật kèo" if updated else "📌 Thông tin kèo"
+    title = "♻️ Đã cập nhật UID thành công!" if updated else "✅ Đã thêm UID thành công!"
     await message.answer(
         format_watch_card(item, title=title),
         reply_markup=build_watch_keyboard(item),

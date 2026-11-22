@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import html
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 from src.modules.bulk.domain import extract_uid
+
+_VN_TZ = timezone(timedelta(hours=7))
 
 
 class WatchStatus(StrEnum):
@@ -106,47 +108,95 @@ def format_duration(start: datetime, end: datetime) -> str:
     minutes, secs = divmod(rem, 60)
     chunks: list[str] = []
     if days:
-        chunks.append(f"{days}d")
+        chunks.append(f"{days} ngày")
     if hours:
-        chunks.append(f"{hours}h")
+        chunks.append(f"{hours} giờ")
     if minutes:
-        chunks.append(f"{minutes}m")
-    if secs or not chunks:
-        chunks.append(f"{secs}s")
+        chunks.append(f"{minutes} phút")
+    if not chunks:
+        chunks.append(f"{secs} giây")
     return " ".join(chunks)
 
 
-def _status_badge(status: WatchStatus) -> str:
+def _format_vn_time(dt: datetime) -> str:
+    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    return aware.astimezone(_VN_TZ).strftime("%H:%M:%S %d/%m/%Y")
+
+
+def _format_price(raw_price: str) -> str:
+    cleaned = raw_price.strip()
+    if not cleaned:
+        return "0đ"
+    if cleaned.isdigit():
+        num = int(cleaned)
+        return f"{num:,}đ".replace(",", ".") if num >= 1000 else f"{num}đ"
+    return cleaned
+
+
+def _progress_label(status: WatchStatus) -> str:
     return {
-        WatchStatus.DIE: "🔴 DIE (đang theo dõi)",
-        WatchStatus.LIVE: "🟢 LIVE",
-        WatchStatus.DONE: "✅ DONE",
-        WatchStatus.CANCELLED: "❌ CANCELLED",
+        WatchStatus.DIE: "🔴 Đang theo dõi chờ LIVE ✅",
+        WatchStatus.LIVE: "✅ Đã LIVE lại / Hoàn tất ✅",
+        WatchStatus.DONE: "✅ Đã Done kèo ✅",
+        WatchStatus.CANCELLED: "❌ Đã Hủy kèo",
     }[status]
 
 
-def format_watch_card(item: WatchItem, title: str = "📌 Thông tin kèo") -> str:
-    uid_text = "••••••••" if item.is_hidden else f"<code>{html.escape(item.uid)}</code>"
-    note_text = "<i>(đã ẩn)</i>" if item.is_hidden else html.escape(item.note)
-    price_text = "<i>(đã ẩn)</i>" if item.is_hidden else html.escape(item.price)
+def _spoiler(html_text: str, hidden: bool) -> str:
+    return f"<tg-spoiler>{html_text}</tg-spoiler>" if hidden else html_text
+
+
+def format_watch_card(item: WatchItem, title: str | None = None) -> str:
+    if title is None:
+        header = (
+            f"🔔 🟢 <b>THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!</b> <i>(#{item.id})</i>"
+            if item.status == WatchStatus.LIVE
+            else f"✅ <b>Đã thêm UID thành công!</b> <i>(#{item.id})</i>"
+        )
+    else:
+        header = f"<b>{html.escape(title)}</b> <i>(#{item.id})</i>"
+
+    uid_val = _spoiler(f"<code>{html.escape(item.uid)}</code>", item.is_hidden)
+    note_val = _spoiler(html.escape(item.note), item.is_hidden)
+    price_val = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
+
+    if item.status == WatchStatus.LIVE:
+        uid_line = f"✅ <b>UID</b> {uid_val} - <b>đã Sống lại</b> ✅"
+    elif item.status == WatchStatus.DIE:
+        uid_line = f"❌ <b>UID</b> {uid_val} - <b>DIE</b> 💀"
+    elif item.status == WatchStatus.DONE:
+        uid_line = f"✅ <b>UID</b> {uid_val} - <b>DONE</b>"
+    else:
+        uid_line = f"❌ <b>UID</b> {uid_val} - <b>ĐÃ HỦY</b>"
+
     lines = [
-        f"<b>{html.escape(title)} #{item.id}</b>",
-        f"🆔 UID: {uid_text}",
-        f"📝 Ghi chú: {note_text}",
-        f"💰 Giá: {price_text}",
+        header,
+        "",
+        uid_line,
+        f"📝 <b>Ghi chú:</b> {note_val}",
+        f"💰 <b>Giá:</b> {price_val}",
     ]
     if item.faq:
-        faq_text = "<i>(đã ẩn)</i>" if item.is_hidden else html.escape(item.faq)
-        lines.append(f"❓ FAQ: {faq_text}")
-    lines.append(f"📊 Trạng thái: {_status_badge(item.status)}")
+        faq_raw = (
+            f"{html.escape(item.faq)} → LIVE ✅"
+            if item.status == WatchStatus.LIVE
+            else html.escape(item.faq)
+        )
+        lines.append(f"⚠️ <b>FAQ:</b> {_spoiler(faq_raw, item.is_hidden)}")
+
+    lines.append(f"🔄 <b>Tiến trình:</b> {_progress_label(item.status)}")
+    display_time = item.live_detected_at or item.last_checked_at or item.created_at
+    lines.append(f"🕒 <b>Thời gian:</b> {_format_vn_time(display_time)}")
+
     if item.live_detected_at:
         elapsed = format_duration(item.created_at, item.live_detected_at)
-        lines.append(f"⏱ Thời gian về LIVE: <b>{elapsed}</b>")
+        lines.append(f"⏱ <b>Thời Gian Xử Lý:</b> {elapsed}")
+
     return "\n".join(lines)
 
 
 def format_live_notification(item: WatchItem) -> str:
-    return format_watch_card(item, title="🎉 UID ĐÃ VỀ LIVE")
+    return format_watch_card(item, title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!")
 
 
 def format_watch_list(
@@ -171,11 +221,11 @@ def format_watch_list(
             WatchStatus.DONE: "✅",
             WatchStatus.CANCELLED: "❌",
         }[item.status]
-        uid_display = "••••" if item.is_hidden else html.escape(item.uid)
-        note_display = "(ẩn)" if item.is_hidden else html.escape(item.note)
-        price_display = "(ẩn)" if item.is_hidden else html.escape(item.price)
+        uid_display = _spoiler(f"<code>{html.escape(item.uid)}</code>", item.is_hidden)
+        note_display = _spoiler(html.escape(item.note), item.is_hidden)
+        price_display = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
         rows.append(
-            f"{badge} <b>#{item.id}</b> <code>{uid_display}</code> — {note_display} | 💰 {price_display}"
+            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}"
         )
     return "\n".join(rows)
 
@@ -219,10 +269,10 @@ def format_search_results(query: str, items: list[WatchItem]) -> str:
             WatchStatus.DONE: "✅",
             WatchStatus.CANCELLED: "❌",
         }[item.status]
-        uid_display = "••••" if item.is_hidden else html.escape(item.uid)
-        note_display = "(ẩn)" if item.is_hidden else html.escape(item.note)
-        price_display = "(ẩn)" if item.is_hidden else html.escape(item.price)
+        uid_display = _spoiler(f"<code>{html.escape(item.uid)}</code>", item.is_hidden)
+        note_display = _spoiler(html.escape(item.note), item.is_hidden)
+        price_display = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
         rows.append(
-            f"{badge} <b>#{item.id}</b> <code>{uid_display}</code> — {note_display} | 💰 {price_display}"
+            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}"
         )
     return "\n".join(rows)

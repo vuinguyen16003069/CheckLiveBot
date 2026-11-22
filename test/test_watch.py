@@ -57,8 +57,8 @@ def test_parse_add_line_and_html_escape() -> None:
 
     item.is_hidden = True
     hidden_card = format_watch_card(item)
-    assert "100012345678901" not in hidden_card
-    assert "(đã ẩn)" in hidden_card
+    assert "<tg-spoiler><code>100012345678901</code></tg-spoiler>" in hidden_card
+    assert "<tg-spoiler>&lt;VIP&gt; &amp; Co</tg-spoiler>" in hidden_card
 
     with pytest.raises(ValueError):
         parse_add_line("invalid_line")
