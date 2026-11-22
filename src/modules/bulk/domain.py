@@ -123,3 +123,20 @@ def build_result_files(
     if error_uids:
         files.append(("error.txt", ("\n".join(error_uids) + "\n").encode("utf-8")))
     return files
+
+
+def build_combined_result_file(
+    live_uids: Sequence[str],
+    die_uids: Sequence[str],
+    error_uids: Sequence[str],
+    job_id: str,
+) -> tuple[str, bytes]:
+    sections: list[str] = []
+    if live_uids:
+        sections.append(f"=== LIVE ({len(live_uids)}) ===\n" + "\n".join(live_uids))
+    if die_uids:
+        sections.append(f"=== DIE ({len(die_uids)}) ===\n" + "\n".join(die_uids))
+    if error_uids:
+        sections.append(f"=== ERROR ({len(error_uids)}) ===\n" + "\n".join(error_uids))
+    content = ("\n\n".join(sections) + "\n") if sections else ""
+    return f"result_{job_id}.txt", content.encode("utf-8")

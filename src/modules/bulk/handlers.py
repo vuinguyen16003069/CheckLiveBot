@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 from collections.abc import Sequence
 
@@ -13,7 +14,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 
 from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import (
-    build_result_files,
+    build_combined_result_file,
     extract_uid,
     extract_uids_from_text,
     format_single_check,
@@ -55,19 +56,19 @@ class TelegramBulkNotifier:
         die_uids: Sequence[str],
         error_uids: Sequence[str],
         job_id: str,
+        status_message_id: int | None = None,
     ) -> None:
-        files = build_result_files(live_uids, die_uids, error_uids)
-        if not files:
+        if status_message_id is not None:
+            with contextlib.suppress(TelegramBadRequest):
+                await self._bot.delete_message(chat_id=chat_id, message_id=status_message_id)
+
+        filename, content = build_combined_result_file(live_uids, die_uids, error_uids, job_id)
+        if not content:
             await self._bot.send_message(chat_id=chat_id, text=caption)
             return
 
-        for idx, (filename, content) in enumerate(files):
-            doc = BufferedInputFile(content, filename=f"{job_id}_{filename}")
-            await self._bot.send_document(
-                chat_id=chat_id,
-                document=doc,
-                caption=caption if idx == 0 else None,
-            )
+        doc = BufferedInputFile(content, filename=filename)
+        await self._bot.send_document(chat_id=chat_id, document=doc, caption=caption)
 
 
 def _quick_watch_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup | None:
@@ -138,7 +139,7 @@ def create_bulk_router(
             return
 
         current_state = await state.get_state()
-        if current_state == BulkStates.waiting_for_uids.state:
+        if current_state is not None:
             await state.clear()
 
         buf = io.BytesIO()

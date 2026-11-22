@@ -67,4 +67,5 @@ class BulkNotifierPort(Protocol):
         die_uids: Sequence[str],
         error_uids: Sequence[str],
         job_id: str,
+        status_message_id: int | None = None,
     ) -> None: ...

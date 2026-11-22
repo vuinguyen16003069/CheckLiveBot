@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.core.ports import CheckOutcome
-from src.modules.bulk.domain import extract_uid, format_single_check
+from src.modules.bulk.domain import extract_uid, extract_uids_from_text, format_single_check
 from src.modules.bulk.service import BulkCheckService
 from src.modules.watch.domain import (
     WatchItem,
@@ -130,7 +130,8 @@ def create_watch_router(
         elif text == REPLY_BTN_CHECK:
             await state.set_state(CheckOneStates.waiting_for_uid)
             await message.answer(
-                "🔎 Gửi <b>1 UID</b> hoặc <b>link Facebook</b> cần kiểm tra:",
+                "🔎 <b>Check nhanh (1 UID hoặc hàng loạt)</b>\n\n"
+                "Gửi <b>1 UID / link Facebook</b>, <b>danh sách nhiều dòng UID</b> hoặc <b>file .txt</b>:",
                 reply_markup=build_cancel_keyboard(),
             )
         elif text == REPLY_BTN_STATS:
@@ -343,11 +344,35 @@ def create_watch_router(
             await state.clear()
             await message.answer("⚠️ Chức năng check nhanh chưa sẵn sàng.")
             return
+
+        # Support multi-line bulk check directly inside "🔎 Check nhanh"
+        if "\n" in raw:
+            uids, _ = extract_uids_from_text(raw, max_uids=50000)
+            if len(uids) >= 2:
+                await state.clear()
+                status_msg = await message.answer("⏳ Đang tiếp nhận danh sách UID...")
+                try:
+                    job_id, total, skipped = await bulk_service.enqueue_bulk_text(
+                        chat_id=message.chat.id,
+                        text=raw,
+                        status_message_id=status_msg.message_id,
+                    )
+                except (ValueError, RuntimeError) as exc:
+                    await status_msg.edit_text(f"❌ {exc}")
+                    return
+                extra = f" (đã lọc bỏ {skipped:,} dòng trùng/lỗi)" if skipped else ""
+                await status_msg.edit_text(
+                    f"📥 <b>Đã nhận {total:,} UID</b>{extra}\n"
+                    f"🆔 Mã phiên: <code>#{job_id}</code>\n"
+                    "⚙️ Bot đang kiểm tra ngầm và sẽ cập nhật tiến độ liên tục..."
+                )
+                return
+
         try:
             uid, outcome, from_cache = await bulk_service.check_single_uid(raw)
         except ValueError as exc:
             await message.answer(
-                f"❌ {exc}\n👉 Ví dụ đúng: <code>20531316728</code>",
+                f"❌ {exc}\n👉 Ví dụ đúng: <code>20531316728</code> hoặc dán nhiều dòng UID.",
                 reply_markup=build_cancel_keyboard(),
             )
             return
@@ -485,7 +510,8 @@ def create_watch_router(
             await state.set_state(CheckOneStates.waiting_for_uid)
             await _safe_edit(
                 msg,
-                "🔎 Gửi <b>1 UID</b> hoặc <b>link Facebook</b> cần kiểm tra:",
+                "🔎 <b>Check nhanh (1 UID hoặc hàng loạt)</b>\n\n"
+                "Gửi <b>1 UID / link Facebook</b>, <b>danh sách nhiều dòng UID</b> hoặc <b>file .txt</b>:",
                 build_cancel_keyboard(),
             )
         elif action == "bulk":

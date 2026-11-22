@@ -159,7 +159,9 @@ def test_wizard_steps_and_cancel_keyboard() -> None:
     stats = WatchStats(total=10, die=4, live=2, done=4, cancelled=0)
     dash = format_welcome_dashboard(stats)
     assert "Đang chờ: <b>4</b>" in dash
-    assert "60%" in format_watch_stats(stats)
+    stats_text = format_watch_stats(stats)
+    assert "Tổng số kèo: <b>10</b>" in stats_text
+    assert "Tỷ lệ" not in stats_text
 
     rk = build_reply_keyboard()
     assert len(rk.keyboard) == 2 and len(rk.keyboard[0]) == 2

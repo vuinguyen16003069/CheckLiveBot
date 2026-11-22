@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from src.modules.bulk.domain import extract_uid, render_progress_bar
+from src.modules.bulk.domain import extract_uid
 
 _VN_TZ = timezone(timedelta(hours=7))
 
@@ -248,16 +248,13 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
 
 
 def format_watch_stats(stats: WatchStats) -> str:
-    completed = stats.live + stats.done
-    bar = render_progress_bar(completed, stats.total, width=10)
     return (
         "📊 <b>Thống kê kèo trong chat</b>\n\n"
         f"• Tổng số kèo: <b>{stats.total}</b>\n"
         f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>\n"
         f"• 🟢 Đã về LIVE: <b>{stats.live}</b>\n"
         f"• ✅ Đã Done: <b>{stats.done}</b>\n"
-        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>\n\n"
-        f"📈 Tỷ lệ về LIVE / Done: <code>{bar}</code>"
+        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>"
     )
 
 

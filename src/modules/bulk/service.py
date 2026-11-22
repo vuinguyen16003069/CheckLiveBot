@@ -171,7 +171,6 @@ class BulkCheckService:
         )
 
         caption = format_bulk_summary(summary)
-        await notifier.update_progress(chat_id, status_message_id, caption)
         await notifier.send_bulk_results(
             chat_id=chat_id,
             caption=caption,
@@ -179,6 +178,7 @@ class BulkCheckService:
             die_uids=die_uids,
             error_uids=error_uids,
             job_id=job_id,
+            status_message_id=status_message_id,
         )
         logger.info(
             "bulk_job_completed",

@@ -8,6 +8,7 @@ import pytest
 from src.core.ports import CheckOutcome, UidCheckResult
 from src.core.redis import RedisCache
 from src.modules.bulk.domain import (
+    build_combined_result_file,
     build_result_files,
     extract_uid,
     extract_uids_from_text,
@@ -53,6 +54,7 @@ class _StubBulkNotifier:
         die_uids: Sequence[str],
         error_uids: Sequence[str],
         job_id: str,
+        status_message_id: int | None = None,
     ) -> None:
         self.results.append((list(live_uids), list(die_uids), list(error_uids)))
 
@@ -73,6 +75,10 @@ def test_extract_uids_deduplicates_large_input_and_progress_bar() -> None:
     assert render_progress_bar(5, 10, width=10) == "[█████░░░░░] 50%"
     files = dict(build_result_files(["10001"], ["10002"], []))
     assert set(files.keys()) == {"live.txt", "die.txt"}
+    fname, content = build_combined_result_file(["10001"], ["10002"], [], "abc123")
+    assert fname == "result_abc123.txt"
+    decoded = content.decode("utf-8")
+    assert "=== LIVE (1) ===" in decoded and "=== DIE (1) ===" in decoded
 
 
 @pytest.mark.asyncio
@@ -120,7 +126,7 @@ async def test_bulk_check_service_uses_cache_and_sends_result_files() -> None:
     assert summary.die == 1
     assert summary.error == 1
     assert "100001" not in checker.called
-    assert len(notifier.progress_updates) >= 2
+    assert len(notifier.progress_updates) >= 1
     assert len(notifier.results) == 1
     assert set(notifier.results[0][0]) == {"100001", "100002"}
     assert notifier.results[0][1] == ["100003"]
