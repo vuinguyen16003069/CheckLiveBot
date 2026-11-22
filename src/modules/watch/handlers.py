@@ -196,8 +196,12 @@ def create_watch_router(
         text = (message.text or "").strip()
         await state.clear()
         user_id = message.from_user.id if message.from_user else 0
-        added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
-        lines = [f"✅ Đã thêm/cập nhật <b>{len(added)}</b> kèo thành công."]
+        added, updated_count, errors = await watch_service.add_watch_batch(
+            message.chat.id, user_id, text
+        )
+        lines = [
+            f"✅ Thêm mới: <b>{len(added)}</b> kèo | ♻️ Cập nhật (trùng UID): <b>{updated_count}</b> kèo."
+        ]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])
@@ -213,8 +217,12 @@ def create_watch_router(
         await bot.download(document, destination=buf)
         text = buf.getvalue().decode("utf-8", errors="ignore")
         user_id = message.from_user.id if message.from_user else 0
-        added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
-        lines = [f"✅ Đã thêm/cập nhật <b>{len(added)}</b> kèo từ file."]
+        added, updated_count, errors = await watch_service.add_watch_batch(
+            message.chat.id, user_id, text
+        )
+        lines = [
+            f"✅ Từ file — Thêm mới: <b>{len(added)}</b> kèo | ♻️ Cập nhật (trùng UID): <b>{updated_count}</b> kèo."
+        ]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])

@@ -154,8 +154,12 @@ def create_bulk_router(
             and current_state != BulkStates.waiting_for_uids.state
         ):
             user_id = message.from_user.id if message.from_user else 0
-            added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
-            lines = [f"✅ Nhận diện file danh sách kèo: đã thêm/cập nhật <b>{len(added)}</b> kèo."]
+            added, updated_count, errors = await watch_service.add_watch_batch(
+                message.chat.id, user_id, text
+            )
+            lines = [
+                f"✅ Nhận diện file kèo — Thêm mới: <b>{len(added)}</b> | ♻️ Cập nhật (trùng UID): <b>{updated_count}</b>."
+            ]
             if errors:
                 lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
                 lines.extend(errors[:10])

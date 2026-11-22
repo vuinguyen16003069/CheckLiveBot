@@ -75,7 +75,7 @@ async def test_watch_upsert_search_and_delete() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     cache = RedisCache(redis, prefix="test")
     repo = RedisWatchRepository(redis, prefix="test")
-    checker = _StubChecker({"100099": CheckOutcome.DIE})
+    checker = _StubChecker({"100099": CheckOutcome.DIE, "20531316728": CheckOutcome.LIVE})
     svc = WatchService(repo=repo, checker=checker, cache=cache)
 
     item1, updated1 = await svc.upsert_watch(100, 1, "100099 | Khách cũ | 10k")
@@ -85,6 +85,14 @@ async def test_watch_upsert_search_and_delete() -> None:
     assert item1.id == item2.id
     assert item2.note == "Khách mới"
     assert item2.price == "50k"
+
+    # Also deduplicates LIVE watches
+    live1, live_upd1 = await svc.upsert_watch(100, 1, "20531316728 | FB 1 | 0")
+    live2, live_upd2 = await svc.upsert_watch(100, 1, "20531316728 | FB 2 | 10k")
+    assert live_upd1 is False
+    assert live_upd2 is True
+    assert live1.id == live2.id
+    assert live2.note == "FB 2"
 
     found = await svc.search_watches(100, "Khách mới")
     assert len(found) == 1 and found[0].id == item1.id

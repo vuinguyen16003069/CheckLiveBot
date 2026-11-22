@@ -66,9 +66,9 @@ class RedisWatchRepository:
                 self._k(f"watches:chat:{chat_id}:status:{status.value}"),
                 {str(watch_id): score},
             )
+            pipe.hset(self._k(f"chat_uid:{chat_id}"), uid, str(watch_id))
             if status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(watch_id))
-                pipe.hset(self._k(f"chat_die_uid:{chat_id}"), uid, str(watch_id))
             await pipe.execute()
 
         await self.append_event(
@@ -82,15 +82,21 @@ class RedisWatchRepository:
         )
         return item
 
-    async def find_active_die_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
-        raw_id = await self._redis.hget(self._k(f"chat_die_uid:{chat_id}"), uid)  # type: ignore[misc]
-        if not raw_id:
-            return None
-        item = await self.get(int(raw_id))
-        if item is None or item.chat_id != chat_id or item.status != WatchStatus.DIE:
-            await self._redis.hdel(self._k(f"chat_die_uid:{chat_id}"), uid)  # type: ignore[misc]
-            return None
-        return item
+    async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
+        raw_id = await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+        if raw_id:
+            item = await self.get(int(raw_id))
+            if item is not None and item.chat_id == chat_id and item.uid == uid:
+                return item
+            await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+
+        # Backfill check for older watches created before chat_uid index existed
+        items, _, _ = await self.list_chat_items(chat_id, page=1, page_size=500)
+        for item in items:
+            if item.uid == uid:
+                await self._redis.hset(self._k(f"chat_uid:{chat_id}"), uid, str(item.id))  # type: ignore[misc]
+                return item
+        return None
 
     async def get(self, watch_id: int) -> WatchItem | None:
         raw = await self._redis.get(self._k(f"watch:{watch_id}"))
@@ -107,6 +113,7 @@ class RedisWatchRepository:
         score = item.created_at.timestamp()
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json())
+            pipe.hset(self._k(f"chat_uid:{item.chat_id}"), item.uid, str(item.id))
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
                     self._k(f"watches:chat:{item.chat_id}:status:{previous_status.value}"),
@@ -118,10 +125,8 @@ class RedisWatchRepository:
                 )
             if item.status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(item.id))
-                pipe.hset(self._k(f"chat_die_uid:{item.chat_id}"), item.uid, str(item.id))
             else:
                 pipe.srem(self._k("watches:die"), str(item.id))
-                pipe.hdel(self._k(f"chat_die_uid:{item.chat_id}"), item.uid)
             await pipe.execute()
         return item
 
@@ -134,7 +139,7 @@ class RedisWatchRepository:
                 str(item.id),
             )
             pipe.srem(self._k("watches:die"), str(item.id))
-            pipe.hdel(self._k(f"chat_die_uid:{item.chat_id}"), item.uid)
+            pipe.hdel(self._k(f"chat_uid:{item.chat_id}"), item.uid)
             await pipe.execute()
         await self.append_event(
             WatchEvent(
@@ -239,7 +244,7 @@ class WatchService:
     ) -> tuple[WatchItem, bool]:
         parsed = parse_add_line(raw_args)
 
-        existing = await self._repo.find_active_die_by_uid(chat_id, parsed.uid)
+        existing = await self._repo.find_by_uid(chat_id, parsed.uid)
         if existing is not None:
             existing.note = parsed.note
             existing.price = parsed.price
@@ -343,17 +348,21 @@ class WatchService:
         chat_id: int,
         user_id: int,
         raw_text: str,
-    ) -> tuple[list[WatchItem], list[str]]:
+    ) -> tuple[list[WatchItem], int, list[str]]:
         lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
         added: list[WatchItem] = []
+        updated_count = 0
         errors: list[str] = []
         for idx, line in enumerate(lines, start=1):
             try:
-                item = await self.add_watch(chat_id, user_id, line)
-                added.append(item)
+                item, was_updated = await self.upsert_watch(chat_id, user_id, line)
+                if was_updated:
+                    updated_count += 1
+                else:
+                    added.append(item)
             except ValueError as exc:
                 errors.append(f"Dòng {idx}: {exc}")
-        return added, errors
+        return added, updated_count, errors
 
     async def list_watches(
         self,
