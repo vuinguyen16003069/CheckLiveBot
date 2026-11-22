@@ -369,7 +369,7 @@ class WatchService:
             chat_id,
             status_filter=status_filter,
             page=page,
-            page_size=8,
+            page_size=10,
         )
 
     async def get_stats(self, chat_id: int) -> WatchStats:

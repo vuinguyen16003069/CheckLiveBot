@@ -540,8 +540,6 @@ def build_list_keyboard(
         for code, label in filters
     ]
     rows: list[list[InlineKeyboardButton]] = [filter_row]
-    if items:
-        rows.extend(_build_item_picker_rows(items, back_status=status_filter, back_page=page))
     if total_pages > 1:
         nav_row: list[InlineKeyboardButton] = []
         if page > 1:

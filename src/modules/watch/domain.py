@@ -210,6 +210,7 @@ def format_watch_list(
     page: int,
     total_pages: int,
     total_items: int,
+    bot_username: str | None = None,
 ) -> str:
     header = (
         f"📋 <b>Danh sách kèo</b> (Lọc: <b>{html.escape(status_filter)}</b> | "
@@ -225,13 +226,22 @@ def format_watch_list(
             WatchStatus.DONE: "✅",
             WatchStatus.CANCELLED: "❌",
         }[item.status]
-        uid_display = f"<code>{html.escape(item.uid)}</code>"
+        escaped_uid = html.escape(item.uid)
+        if bot_username:
+            uid_display = (
+                f'<a href="https://t.me/{html.escape(bot_username)}?start=w_{item.id}">'
+                f"{escaped_uid}</a>"
+            )
+        else:
+            uid_display = f"<code>{escaped_uid}</code>"
         note_display = html.escape(item.note)
         price_display = html.escape(_format_price(item.price))
         faq_part = f" | ⚠️ {html.escape(item.faq)}" if item.faq else ""
         rows.append(
             f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
         )
+    if bot_username:
+        rows.append("\n<i>💡 Chạm vào UID để xem chi tiết kèo.</i>")
     return "\n".join(rows)
 
 
@@ -277,7 +287,12 @@ def format_watch_history(events: list[WatchEvent]) -> str:
     return "\n".join(lines)
 
 
-def format_search_results(query: str, items: list[WatchItem]) -> str:
+def format_search_results(
+    query: str,
+    items: list[WatchItem],
+    *,
+    bot_username: str | None = None,
+) -> str:
     header = (
         f"🔍 <b>Kết quả tìm kiếm</b> cho <code>{html.escape(query)}</code> ({len(items)} kèo)\n"
     )
@@ -291,7 +306,14 @@ def format_search_results(query: str, items: list[WatchItem]) -> str:
             WatchStatus.DONE: "✅",
             WatchStatus.CANCELLED: "❌",
         }[item.status]
-        uid_display = f"<code>{html.escape(item.uid)}</code>"
+        escaped_uid = html.escape(item.uid)
+        if bot_username:
+            uid_display = (
+                f'<a href="https://t.me/{html.escape(bot_username)}?start=w_{item.id}">'
+                f"{escaped_uid}</a>"
+            )
+        else:
+            uid_display = f"<code>{escaped_uid}</code>"
         note_display = html.escape(item.note)
         price_display = html.escape(_format_price(item.price))
         faq_part = f" | ⚠️ {html.escape(item.faq)}" if item.faq else ""

@@ -92,9 +92,37 @@ def create_watch_router(
 ) -> Router:
     router = Router(name="watch")
 
+    bot_username_cache: dict[str, str | None] = {"value": None}
+
+    async def _get_bot_username(bot: Bot) -> str | None:
+        if bot_username_cache["value"] is None:
+            with contextlib.suppress(Exception):
+                me = await bot.get_me()
+                bot_username_cache["value"] = me.username
+        return bot_username_cache["value"]
+
     @router.message(Command("start"))
-    async def cmd_start(message: Message, state: FSMContext) -> None:
+    async def cmd_start(message: Message, command: CommandObject, state: FSMContext) -> None:
         await state.clear()
+        payload = (command.args or "").strip()
+        if payload.startswith("w_") and payload[2:].isdigit():
+            watch_id = int(payload[2:])
+            try:
+                item = await watch_service.get_watch(message.chat.id, watch_id)
+            except ValueError:
+                await message.answer(
+                    "⚠️ Không tìm thấy kèo này trong chat.",
+                    reply_markup=build_back_menu_keyboard(),
+                )
+                return
+            with contextlib.suppress(TelegramBadRequest):
+                await message.delete()
+            await message.answer(
+                format_watch_card(item),
+                reply_markup=build_watch_keyboard(item, back_status="ALL", back_page=1),
+            )
+            return
+
         stats = await watch_service.get_stats(message.chat.id)
         tmp = await message.answer("⚡", reply_markup=build_reply_keyboard())
         with contextlib.suppress(TelegramBadRequest):
@@ -120,13 +148,13 @@ def create_watch_router(
 
     # Persistent bottom Reply Keyboard shortcuts (work from ANY state!)
     @router.message(F.text.in_(REPLY_SHORTCUTS))
-    async def handle_reply_shortcuts(message: Message, state: FSMContext) -> None:
+    async def handle_reply_shortcuts(message: Message, state: FSMContext, bot: Bot) -> None:
         await state.clear()
         text = message.text or ""
         if text == REPLY_BTN_ADD:
             await _start_wizard(message, state, DealDraft(), step=1)
         elif text == REPLY_BTN_LIST:
-            await _send_list_message(message, watch_service)
+            await _send_list_message(message, watch_service, await _get_bot_username(bot))
         elif text == REPLY_BTN_CHECK:
             await state.set_state(CheckOneStates.waiting_for_uid)
             await message.answer(
@@ -308,11 +336,16 @@ def create_watch_router(
         await message.answer("\n".join(lines), reply_markup=build_back_menu_keyboard())
 
     @router.message(Command("list"))
-    async def cmd_list(message: Message) -> None:
-        await _send_list_message(message, watch_service)
+    async def cmd_list(message: Message, bot: Bot) -> None:
+        await _send_list_message(message, watch_service, await _get_bot_username(bot))
 
     @router.message(Command("find"))
-    async def cmd_find(message: Message, command: CommandObject, state: FSMContext) -> None:
+    async def cmd_find(
+        message: Message,
+        command: CommandObject,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
         query = (command.args or "").strip()
         if not query:
             await state.set_state(SearchStates.waiting_for_query)
@@ -323,18 +356,20 @@ def create_watch_router(
             return
         items = await watch_service.search_watches(message.chat.id, query)
         await message.answer(
-            format_search_results(query, items),
+            format_search_results(query, items, bot_username=await _get_bot_username(bot)),
             reply_markup=build_search_results_keyboard(items),
+            disable_web_page_preview=True,
         )
 
     @router.message(SearchStates.waiting_for_query, F.text)
-    async def handle_search_query(message: Message, state: FSMContext) -> None:
+    async def handle_search_query(message: Message, state: FSMContext, bot: Bot) -> None:
         query = (message.text or "").strip()
         await state.clear()
         items = await watch_service.search_watches(message.chat.id, query)
         await message.answer(
-            format_search_results(query, items),
+            format_search_results(query, items, bot_username=await _get_bot_username(bot)),
             reply_markup=build_search_results_keyboard(items),
+            disable_web_page_preview=True,
         )
 
     @router.message(CheckOneStates.waiting_for_uid, F.text)
@@ -701,7 +736,11 @@ def create_watch_router(
         await query.answer("📝 Đã điền sẵn UID — nhập ghi chú nhé!")
 
     @router.callback_query(ListPageCallback.filter())
-    async def cb_list_page(query: CallbackQuery, callback_data: ListPageCallback) -> None:
+    async def cb_list_page(
+        query: CallbackQuery,
+        callback_data: ListPageCallback,
+        bot: Bot,
+    ) -> None:
         msg = query.message
         if not isinstance(msg, Message):
             await query.answer()
@@ -719,6 +758,7 @@ def create_watch_router(
             page=safe_page,
             total_pages=total_pages,
             total_items=total,
+            bot_username=await _get_bot_username(bot),
         )
         await _safe_edit(
             msg,
@@ -815,7 +855,11 @@ def create_watch_router(
     return router
 
 
-async def _send_list_message(message: Message, watch_service: WatchService) -> None:
+async def _send_list_message(
+    message: Message,
+    watch_service: WatchService,
+    bot_username: str | None = None,
+) -> None:
     items, total, total_pages = await watch_service.list_watches(message.chat.id, page=1)
     text = format_watch_list(
         items,
@@ -823,8 +867,13 @@ async def _send_list_message(message: Message, watch_service: WatchService) -> N
         page=1,
         total_pages=total_pages,
         total_items=total,
+        bot_username=bot_username,
     )
-    await message.answer(text, reply_markup=build_list_keyboard("ALL", 1, total_pages, items))
+    await message.answer(
+        text,
+        reply_markup=build_list_keyboard("ALL", 1, total_pages, items),
+        disable_web_page_preview=True,
+    )
 
 
 async def _start_wizard(
@@ -1016,4 +1065,4 @@ async def _safe_edit(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     with contextlib.suppress(TelegramBadRequest):
-        await message.edit_text(text, reply_markup=reply_markup)
+        await message.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)

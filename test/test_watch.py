@@ -190,8 +190,20 @@ def test_wizard_steps_and_cancel_keyboard() -> None:
     sample_item = WatchItem(id=7, chat_id=1, owner_user_id=1, uid="10001", note="N", price="0")
     list_kb = build_list_keyboard("ALL", 1, 1, [sample_item])
     flat_texts = [btn.text for row in list_kb.inline_keyboard for btn in row]
-    assert "#7" in flat_texts
+    assert "#7" not in flat_texts
     assert "🔄 Quét lại DIE" in flat_texts
+
+    from src.modules.watch.domain import format_watch_list
+
+    list_html = format_watch_list(
+        [sample_item],
+        status_filter="ALL",
+        page=1,
+        total_pages=1,
+        total_items=1,
+        bot_username="my_checklive_bot",
+    )
+    assert 'href="https://t.me/my_checklive_bot?start=w_7"' in list_html
 
     del_kb = build_delete_confirm_keyboard(7)
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
