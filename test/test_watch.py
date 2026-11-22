@@ -63,6 +63,36 @@ def test_parse_add_line_and_html_escape() -> None:
     with pytest.raises(ValueError):
         parse_add_line("invalid_line")
 
+    # Flexible styles: "UID note | price" and bare "UID"
+    compact = parse_add_line("100012345678901 Khách VIP | 90k")
+    assert (compact.uid, compact.note, compact.price) == ("100012345678901", "Khách VIP", "90k")
+    bare = parse_add_line("100012345678901")
+    assert bare.uid == "100012345678901"
+
+
+@pytest.mark.asyncio
+async def test_watch_upsert_search_and_delete() -> None:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    cache = RedisCache(redis, prefix="test")
+    repo = RedisWatchRepository(redis, prefix="test")
+    checker = _StubChecker({"100099": CheckOutcome.DIE})
+    svc = WatchService(repo=repo, checker=checker, cache=cache)
+
+    item1, updated1 = await svc.upsert_watch(100, 1, "100099 | Khách cũ | 10k")
+    item2, updated2 = await svc.upsert_watch(100, 1, "100099 | Khách mới | 50k")
+    assert updated1 is False
+    assert updated2 is True
+    assert item1.id == item2.id
+    assert item2.note == "Khách mới"
+    assert item2.price == "50k"
+
+    found = await svc.search_watches(100, "Khách mới")
+    assert len(found) == 1 and found[0].id == item1.id
+
+    await svc.delete_watch(100, item1.id)
+    assert await svc.search_watches(100, "100099") == []
+    await redis.aclose()
+
 
 @pytest.mark.asyncio
 async def test_watch_service_lifecycle_pagination_and_isolation() -> None:

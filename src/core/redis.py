@@ -11,19 +11,32 @@ from redis.asyncio import Redis
 from src.core.ports import CheckOutcome
 
 
+def normalize_redis_url(url: str) -> str:
+    cleaned = url.strip()
+    parsed = urlparse(cleaned)
+    if (
+        parsed.scheme.lower() == "redis"
+        and parsed.hostname
+        and parsed.hostname.lower().endswith(".upstash.io")
+    ):
+        return "rediss://" + cleaned[len("redis://") :]
+    return cleaned
+
+
 def create_redis_client(url: str) -> Redis:
+    normalized = normalize_redis_url(url)
     kwargs: dict[str, Any] = {
         "decode_responses": True,
         "socket_keepalive": True,
         "health_check_interval": 30,
     }
-    if url.lower().startswith("rediss://"):
+    if normalized.lower().startswith("rediss://"):
         kwargs["ssl_cert_reqs"] = None
-    return Redis.from_url(url, **kwargs)
+    return Redis.from_url(normalized, **kwargs)
 
 
 def build_arq_redis_settings(url: str) -> RedisSettings:
-    parsed = urlparse(url)
+    parsed = urlparse(normalize_redis_url(url))
     is_tls = parsed.scheme.lower() == "rediss"
     database = int(parsed.path.lstrip("/") or 0)
     if is_tls:

@@ -68,6 +68,7 @@ class RedisWatchRepository:
             )
             if status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(watch_id))
+                pipe.hset(self._k(f"chat_die_uid:{chat_id}"), uid, str(watch_id))
             await pipe.execute()
 
         await self.append_event(
@@ -79,6 +80,16 @@ class RedisWatchRepository:
                 detail=status.value,
             )
         )
+        return item
+
+    async def find_active_die_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
+        raw_id = await self._redis.hget(self._k(f"chat_die_uid:{chat_id}"), uid)  # type: ignore[misc]
+        if not raw_id:
+            return None
+        item = await self.get(int(raw_id))
+        if item is None or item.chat_id != chat_id or item.status != WatchStatus.DIE:
+            await self._redis.hdel(self._k(f"chat_die_uid:{chat_id}"), uid)  # type: ignore[misc]
+            return None
         return item
 
     async def get(self, watch_id: int) -> WatchItem | None:
@@ -107,10 +118,33 @@ class RedisWatchRepository:
                 )
             if item.status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(item.id))
+                pipe.hset(self._k(f"chat_die_uid:{item.chat_id}"), item.uid, str(item.id))
             else:
                 pipe.srem(self._k("watches:die"), str(item.id))
+                pipe.hdel(self._k(f"chat_die_uid:{item.chat_id}"), item.uid)
             await pipe.execute()
         return item
+
+    async def delete(self, item: WatchItem) -> None:
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.delete(self._k(f"watch:{item.id}"))
+            pipe.zrem(self._k(f"watches:chat:{item.chat_id}"), str(item.id))
+            pipe.zrem(
+                self._k(f"watches:chat:{item.chat_id}:status:{item.status.value}"),
+                str(item.id),
+            )
+            pipe.srem(self._k("watches:die"), str(item.id))
+            pipe.hdel(self._k(f"chat_die_uid:{item.chat_id}"), item.uid)
+            await pipe.execute()
+        await self.append_event(
+            WatchEvent(
+                watch_id=item.id,
+                chat_id=item.chat_id,
+                uid=item.uid,
+                event_type="DELETED",
+                detail=item.status.value,
+            )
+        )
 
     async def count_active_die(self, chat_id: int) -> int:
         return int(await self._redis.zcard(self._k(f"watches:chat:{chat_id}:status:DIE")))
@@ -200,8 +234,30 @@ class WatchService:
         self._max_active_per_chat = max_active_per_chat
         self._concurrency = max(1, concurrency)
 
-    async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
+    async def upsert_watch(
+        self, chat_id: int, user_id: int, raw_args: str
+    ) -> tuple[WatchItem, bool]:
         parsed = parse_add_line(raw_args)
+
+        existing = await self._repo.find_active_die_by_uid(chat_id, parsed.uid)
+        if existing is not None:
+            existing.note = parsed.note
+            existing.price = parsed.price
+            if parsed.faq:
+                existing.faq = parsed.faq
+            existing.last_checked_at = datetime.now(UTC)
+            updated = await self._repo.update(existing)
+            await self._repo.append_event(
+                WatchEvent(
+                    watch_id=updated.id,
+                    chat_id=chat_id,
+                    uid=updated.uid,
+                    event_type="UPDATED",
+                    detail=f"{updated.note} | {updated.price}",
+                )
+            )
+            return updated, True
+
         if self._max_active_per_chat > 0:
             active_count = await self._repo.count_active_die(chat_id)
             if active_count >= self._max_active_per_chat:
@@ -218,7 +274,7 @@ class WatchService:
             await self._cache.set_cached_outcome(parsed.uid, outcome, self._cache_ttl)
 
         initial_status = WatchStatus.LIVE if outcome == CheckOutcome.LIVE else WatchStatus.DIE
-        return await self._repo.create(
+        created = await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
             uid=parsed.uid,
@@ -227,6 +283,32 @@ class WatchService:
             faq=parsed.faq,
             status=initial_status,
         )
+        return created, False
+
+    async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
+        item, _ = await self.upsert_watch(chat_id, user_id, raw_args)
+        return item
+
+    async def delete_watch(self, chat_id: int, watch_id: int) -> WatchItem:
+        item = await self._require_owned(chat_id, watch_id)
+        await self._repo.delete(item)
+        return item
+
+    async def search_watches(self, chat_id: int, query: str) -> list[WatchItem]:
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        items, _, _ = await self._repo.list_chat_items(chat_id, page=1, page_size=500)
+        return [
+            item
+            for item in items
+            if needle in item.uid.lower()
+            or needle in item.note.lower()
+            or needle in item.price.lower()
+            or needle in item.faq.lower()
+            or needle == f"#{item.id}"
+            or needle == str(item.id)
+        ]
 
     async def add_watch_batch(
         self,

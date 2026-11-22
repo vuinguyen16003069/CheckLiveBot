@@ -2,11 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import io
-from collections.abc import Awaitable, Callable
-from typing import Any
 
-import structlog
-from aiogram import BaseMiddleware, Bot, F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject
 from aiogram.filters.callback_data import CallbackData
@@ -17,15 +14,15 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    TelegramObject,
 )
 
-from src.core.ports import CachePort, CheckOutcome
+from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import extract_uid
 from src.modules.watch.domain import (
     WatchItem,
     WatchStatus,
     format_live_notification,
+    format_search_results,
     format_watch_card,
     format_watch_history,
     format_watch_list,
@@ -33,7 +30,9 @@ from src.modules.watch.domain import (
 )
 from src.modules.watch.service import WatchService
 
-logger = structlog.get_logger(__name__)
+
+class AddOneStates(StatesGroup):
+    waiting_for_item = State()
 
 
 class AddListStates(StatesGroup):
@@ -49,39 +48,13 @@ class WatchActionCallback(CallbackData, prefix="w"):
     watch_id: int
 
 
+class QuickWatchCallback(CallbackData, prefix="qw"):
+    uid: str
+
+
 class ListPageCallback(CallbackData, prefix="lp"):
     status: str
     page: int
-
-
-class ThrottlingMiddleware(BaseMiddleware):
-    def __init__(self, cache: CachePort, limit_per_minute: int = 30) -> None:
-        self._cache = cache
-        self._limit = limit_per_minute
-
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: dict[str, Any],
-    ) -> Any:
-        user_id: int | None = None
-        if isinstance(event, (Message, CallbackQuery)) and event.from_user:
-            user_id = event.from_user.id
-
-        if user_id is not None and self._limit > 0:
-            allowed = await self._cache.check_rate_limit(user_id, self._limit)
-            if not allowed:
-                if isinstance(event, Message):
-                    await event.answer(
-                        "⏳ Bạn thao tác hơi nhanh, vui lòng chờ vài giây rồi thử lại."
-                    )
-                elif isinstance(event, CallbackQuery):
-                    await event.answer(
-                        "⏳ Thao tác quá nhanh, thử lại sau vài giây.", show_alert=False
-                    )
-                return None
-        return await handler(event, data)
 
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -89,7 +62,8 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="➕ Thêm kèo", callback_data=MenuCallback(action="add").pack()
+                    text="➕ Thêm kèo",
+                    callback_data=MenuCallback(action="add").pack(),
                 ),
                 InlineKeyboardButton(
                     text="📥 Thêm nhiều kèo",
@@ -98,23 +72,29 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="📋 Danh sách",
-                    callback_data=ListPageCallback(status="ALL", page=1).pack(),
+                    text="📦 Check hàng loạt",
+                    callback_data=MenuCallback(action="bulk").pack(),
                 ),
                 InlineKeyboardButton(
-                    text="📊 Thống kê",
-                    callback_data=MenuCallback(action="stats").pack(),
+                    text="📋 Danh sách kèo",
+                    callback_data=ListPageCallback(status="ALL", page=1).pack(),
                 ),
             ],
             [
                 InlineKeyboardButton(
+                    text="📊 Thống kê",
+                    callback_data=MenuCallback(action="stats").pack(),
+                ),
+                InlineKeyboardButton(
                     text="📜 Lịch sử",
                     callback_data=MenuCallback(action="history").pack(),
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="❓ Hướng dẫn",
                     callback_data=MenuCallback(action="help").pack(),
-                ),
+                )
             ],
         ]
     )
@@ -149,7 +129,11 @@ def build_watch_keyboard(item: WatchItem) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🔄 Kiểm tra lại",
                     callback_data=WatchActionCallback(action="recheck", watch_id=item.id).pack(),
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Xóa",
+                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
+                ),
             ]
         )
     else:
@@ -158,7 +142,11 @@ def build_watch_keyboard(item: WatchItem) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="✅ Tiếp tục theo dõi",
                     callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
-                )
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Xóa",
+                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
+                ),
             ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -198,7 +186,8 @@ def build_list_keyboard(status_filter: str, page: int, total_pages: int) -> Inli
     rows.append(
         [
             InlineKeyboardButton(
-                text="🏠 Menu chính", callback_data=MenuCallback(action="home").pack()
+                text="🔙 Quay lại Menu",
+                callback_data=MenuCallback(action="home").pack(),
             )
         ]
     )
@@ -207,23 +196,24 @@ def build_list_keyboard(status_filter: str, page: int, total_pages: int) -> Inli
 
 WELCOME_TEXT = (
     "👋 <b>Chào mừng đến với CheckLiveBot!</b>\n\n"
-    "Bot hỗ trợ <b>check LIVE/DIE UID Facebook</b> tốc độ cao (hỗ trợ cả file <code>.txt</code> hàng chục nghìn UID) "
-    "và <b>theo dõi kèo tự động DIE → LIVE</b>.\n\n"
-    "Chọn nhanh tính năng bên dưới hoặc gõ /help để xem cú pháp:"
+    "✨ <b>Dùng cực nhanh không cần nhớ lệnh:</b>\n"
+    "• Dán thẳng <b>1 UID</b> hoặc <b>link Facebook</b> → Bot tự check ngay\n"
+    "• Dán <b>nhiều dòng UID</b> hoặc gửi file <code>.txt</code> → Tự check hàng loạt\n\n"
+    "Chọn nhanh tính năng bên dưới hoặc gõ /help:"
 )
 
 HELP_TEXT = (
     "📖 <b>Hướng dẫn sử dụng CheckLiveBot</b>\n\n"
-    "<b>1. Check nhanh & Hàng loạt (ARQ Worker)</b>\n"
-    "• <code>/check &lt;UID hoặc link FB&gt;</code> — Kiểm tra nhanh 1 UID\n"
-    "• <code>/bulk</code> hoặc <b>gửi thẳng file .txt</b> — Check 10k–50k UID kèm progress bar và trả file kết quả\n\n"
+    "<b>1. Dùng nhanh không cần gõ lệnh</b>\n"
+    "• Dán <code>100012345678901</code> hoặc link <code>profile.php?id=...</code> → Check ngay\n"
+    "• Dán danh sách nhiều dòng UID hoặc gửi file <code>.txt</code> → Check hàng loạt (ARQ Worker)\n\n"
     "<b>2. Theo dõi kèo DIE → LIVE</b>\n"
-    "• <code>/add UID | ghi chú | giá [| FAQ]</code> — Thêm 1 kèo theo dõi\n"
-    "• <code>/addlist</code> — Thêm nhiều kèo cùng lúc (mỗi dòng 1 kèo)\n"
-    "• <code>/recheck [UID]</code> — Quét lại ngay các kèo đang DIE\n"
-    "• <code>/list</code> — Danh sách kèo (lọc trạng thái + phân trang)\n"
-    "• <code>/stats</code> — Thống kê số lượng kèo\n"
-    "• <code>/history</code> — Xem 10 sự kiện biến động gần nhất"
+    "• <code>/add UID | ghi chú | giá [| FAQ]</code> *(hoặc gọn: <code>/add UID</code>)*\n"
+    "• <code>/addlist</code> — Thêm nhiều kèo cùng lúc\n"
+    "• <code>/list</code> — Danh sách kèo (lọc & phân trang)\n"
+    "• <code>/find &lt;UID / từ khóa&gt;</code> — Tìm nhanh kèo\n"
+    "• <code>/recheck [UID]</code> — Quét lại ngay kèo đang DIE\n"
+    "• <code>/stats</code> | <code>/history</code> — Thống kê & lịch sử"
 )
 
 
@@ -252,21 +242,28 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await message.answer(HELP_TEXT, reply_markup=build_main_menu_keyboard())
 
     @router.message(Command("add"))
-    async def cmd_add(message: Message, command: CommandObject) -> None:
+    async def cmd_add(message: Message, command: CommandObject, state: FSMContext) -> None:
         raw = (command.args or "").strip()
         if not raw:
+            await state.set_state(AddOneStates.waiting_for_item)
             await message.answer(
-                "📝 Cú pháp: <code>/add UID | ghi chú | giá [| FAQ]</code>\n"
-                "Ví dụ: <code>/add 100012345678901 | Khách A | 50k | FAQ mẫu</code>"
+                "📝 <b>Nhập thông tin kèo cần theo dõi</b> (không cần gõ lại /add):\n"
+                "• Đầy đủ: <code>100012345678901 | Khách A | 50k | FAQ</code>\n"
+                "• Gọn: <code>100012345678901 Khách A | 50k</code> hoặc chỉ <code>100012345678901</code>\n\n"
+                "Gõ /cancel để hủy."
             )
             return
-        user_id = message.from_user.id if message.from_user else 0
-        try:
-            item = await watch_service.add_watch(message.chat.id, user_id, raw)
-        except ValueError as exc:
-            await message.answer(f"❌ {exc}")
+        await _handle_upsert_watch(message, watch_service, raw)
+
+    @router.message(AddOneStates.waiting_for_item, F.text)
+    async def handle_add_one_text(message: Message, state: FSMContext) -> None:
+        text = (message.text or "").strip()
+        if text.lower() == "/cancel":
+            await state.clear()
+            await message.answer("🛑 Đã hủy thêm kèo.")
             return
-        await message.answer(format_watch_card(item), reply_markup=build_watch_keyboard(item))
+        await state.clear()
+        await _handle_upsert_watch(message, watch_service, text)
 
     @router.message(Command("addlist"))
     async def cmd_addlist(message: Message, state: FSMContext) -> None:
@@ -288,7 +285,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await state.clear()
         user_id = message.from_user.id if message.from_user else 0
         added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
-        lines = [f"✅ Đã thêm <b>{len(added)}</b> kèo thành công."]
+        lines = [f"✅ Đã thêm/cập nhật <b>{len(added)}</b> kèo thành công."]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])
@@ -305,7 +302,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         text = buf.getvalue().decode("utf-8", errors="ignore")
         user_id = message.from_user.id if message.from_user else 0
         added, errors = await watch_service.add_watch_batch(message.chat.id, user_id, text)
-        lines = [f"✅ Đã thêm <b>{len(added)}</b> kèo từ file."]
+        lines = [f"✅ Đã thêm/cập nhật <b>{len(added)}</b> kèo từ file."]
         if errors:
             lines.append(f"⚠️ Có <b>{len(errors)}</b> dòng lỗi:")
             lines.extend(errors[:10])
@@ -322,6 +319,18 @@ def create_watch_router(watch_service: WatchService) -> Router:
             total_items=total,
         )
         await message.answer(text, reply_markup=build_list_keyboard("ALL", 1, total_pages))
+
+    @router.message(Command("find"))
+    async def cmd_find(message: Message, command: CommandObject) -> None:
+        query = (command.args or "").strip()
+        if not query:
+            await message.answer("🔍 Cú pháp: <code>/find &lt;UID hoặc từ khóa ghi chú&gt;</code>")
+            return
+        items = await watch_service.search_watches(message.chat.id, query)
+        await message.answer(
+            format_search_results(query, items),
+            reply_markup=build_main_menu_keyboard(),
+        )
 
     @router.message(Command("stats"))
     async def cmd_stats(message: Message) -> None:
@@ -368,17 +377,26 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
         action = callback_data.action
         if action == "home":
+            await state.clear()
             await _safe_edit(msg, WELCOME_TEXT, build_main_menu_keyboard())
         elif action == "add":
+            await state.set_state(AddOneStates.waiting_for_item)
             await msg.answer(
-                "📝 Gửi theo cú pháp:\n<code>/add UID | ghi chú | giá [| FAQ]</code>\n"
-                "Ví dụ: <code>/add 100012345678901 | Khách A | 50k</code>"
+                "📝 Gửi thông tin kèo cần theo dõi:\n"
+                "<code>UID | ghi chú | giá [| FAQ]</code> hoặc chỉ <code>UID</code>.\n"
+                "Gõ /cancel để hủy."
             )
         elif action == "addlist":
             await state.set_state(AddListStates.waiting_for_lines)
             await msg.answer(
                 "📥 Gửi danh sách kèo (mỗi dòng <code>UID | ghi chú | giá [| FAQ]</code>) "
                 "hoặc file <code>.txt</code>. Gõ /cancel để hủy."
+            )
+        elif action == "bulk":
+            await msg.answer(
+                "📦 <b>Check hàng loạt</b>\n\n"
+                "Bạn chỉ cần <b>dán trực tiếp danh sách nhiều dòng UID</b> hoặc <b>gửi file .txt</b> "
+                "vào chat này — Bot sẽ tự nhận diện và chạy ngay!"
             )
         elif action == "stats":
             stats = await watch_service.get_stats(msg.chat.id)
@@ -389,6 +407,29 @@ def create_watch_router(watch_service: WatchService) -> Router:
         elif action == "help":
             await _safe_edit(msg, HELP_TEXT, build_main_menu_keyboard())
         await query.answer()
+
+    @router.callback_query(QuickWatchCallback.filter())
+    async def cb_quick_watch(query: CallbackQuery, callback_data: QuickWatchCallback) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        user_id = query.from_user.id if query.from_user else 0
+        try:
+            item, updated = await watch_service.upsert_watch(
+                msg.chat.id,
+                user_id,
+                callback_data.uid,
+            )
+        except ValueError as exc:
+            await query.answer(str(exc), show_alert=True)
+            return
+        title = "♻️ Đã cập nhật kèo" if updated else "📌 Đã thêm vào theo dõi"
+        await msg.answer(
+            format_watch_card(item, title=title),
+            reply_markup=build_watch_keyboard(item),
+        )
+        await query.answer("✅ Đã đưa vào danh sách theo dõi!")
 
     @router.callback_query(ListPageCallback.filter())
     async def cb_list_page(query: CallbackQuery, callback_data: ListPageCallback) -> None:
@@ -429,6 +470,14 @@ def create_watch_router(watch_service: WatchService) -> Router:
         action = callback_data.action
         watch_id = callback_data.watch_id
         try:
+            if action == "delete":
+                deleted = await watch_service.delete_watch(msg.chat.id, watch_id)
+                await _safe_edit(
+                    msg,
+                    f"🗑 Đã xóa kèo <b>#{deleted.id}</b> (<code>{deleted.uid}</code>).",
+                )
+                await query.answer("🗑 Đã xóa kèo.")
+                return
             if action == "hide":
                 item = await watch_service.set_hidden(msg.chat.id, watch_id, True)
                 toast = "🙈 Đã ẩn thông tin kèo."
@@ -466,6 +515,20 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await query.answer(toast)
 
     return router
+
+
+async def _handle_upsert_watch(message: Message, watch_service: WatchService, raw: str) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    try:
+        item, updated = await watch_service.upsert_watch(message.chat.id, user_id, raw)
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}")
+        return
+    title = "♻️ Đã cập nhật kèo" if updated else "📌 Thông tin kèo"
+    await message.answer(
+        format_watch_card(item, title=title),
+        reply_markup=build_watch_keyboard(item),
+    )
 
 
 async def _safe_edit(

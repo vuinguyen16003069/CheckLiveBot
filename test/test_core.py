@@ -54,6 +54,10 @@ def test_settings_prefers_redis_tls_url_and_parses_proxies() -> None:
     assert arq_tls.host == "ec2-host.amazonaws.com"
     assert arq_tls.port == 12345
 
+    upstash_arq = build_arq_redis_settings("redis://default:pwd@demo-123.upstash.io:6379")
+    assert upstash_arq.ssl is True
+    assert upstash_arq.ssl_cert_reqs == "none"
+
 
 def test_parse_graph_picture_payload() -> None:
     live = {"data": {"height": 50, "width": 50, "url": "https://scontent.xx.fbcdn.net/a.jpg"}}

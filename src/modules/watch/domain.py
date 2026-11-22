@@ -57,19 +57,46 @@ class ParsedWatchInput(BaseModel):
 
 
 def parse_add_line(raw: str) -> ParsedWatchInput:
-    parts = [part.strip() for part in raw.split("|")]
-    if len(parts) < 3:
+    text = raw.strip()
+    if not text:
         raise ValueError(
-            "Sai định dạng. Dùng: <code>/add UID | ghi chú | giá [| FAQ]</code>\n"
-            "Ví dụ: <code>/add 100012345678901 | Khách A | 50k</code>"
+            "Thiếu dữ liệu. Dùng: <code>/add UID | ghi chú | giá [| FAQ]</code>\n"
+            "Hoặc gọn: <code>/add 100012345678901</code>"
         )
-    uid = extract_uid(parts[0])
+
+    parts = [part.strip() for part in text.split("|")]
+
+    # Style 1: /add UID | note | price [| faq]
+    if len(parts) >= 3:
+        uid = extract_uid(parts[0])
+        if not uid:
+            raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link profile.php?id=...).")
+        note = parts[1] or "Không có ghi chú"
+        price = parts[2] or "0"
+        faq = parts[3] if len(parts) >= 4 else ""
+        return ParsedWatchInput(uid=uid, note=note, price=price, faq=faq)
+
+    # Style 2: /add UID note | price  OR  /add UID | note
+    if len(parts) == 2:
+        first_tokens = parts[0].split(None, 1)
+        uid = extract_uid(first_tokens[0]) if first_tokens else None
+        if not uid:
+            raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link profile.php?id=...).")
+        if len(first_tokens) == 2:
+            note = first_tokens[1].strip() or "Không có ghi chú"
+            price = parts[1] or "0"
+        else:
+            note = parts[1] or "Không có ghi chú"
+            price = "0"
+        return ParsedWatchInput(uid=uid, note=note, price=price)
+
+    # Style 3: /add UID [note...]
+    tokens = text.split(None, 1)
+    uid = extract_uid(tokens[0]) if tokens else None
     if not uid:
         raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link profile.php?id=...).")
-    note = parts[1] or "Không có ghi chú"
-    price = parts[2] or "0"
-    faq = parts[3] if len(parts) >= 4 else ""
-    return ParsedWatchInput(uid=uid, note=note, price=price, faq=faq)
+    note = tokens[1].strip() if len(tokens) == 2 else "Theo dõi nhanh"
+    return ParsedWatchInput(uid=uid, note=note, price="0")
 
 
 def format_duration(start: datetime, end: datetime) -> str:
@@ -176,3 +203,26 @@ def format_watch_history(events: list[WatchEvent]) -> str:
             f"[{html.escape(ev.event_type)}]{detail}"
         )
     return "\n".join(lines)
+
+
+def format_search_results(query: str, items: list[WatchItem]) -> str:
+    header = (
+        f"🔍 <b>Kết quả tìm kiếm</b> cho <code>{html.escape(query)}</code> ({len(items)} kèo)\n"
+    )
+    if not items:
+        return header + "\n📭 Không tìm thấy kèo phù hợp trong chat này."
+    rows = [header]
+    for item in items[:20]:
+        badge = {
+            WatchStatus.DIE: "🔴",
+            WatchStatus.LIVE: "🟢",
+            WatchStatus.DONE: "✅",
+            WatchStatus.CANCELLED: "❌",
+        }[item.status]
+        uid_display = "••••" if item.is_hidden else html.escape(item.uid)
+        note_display = "(ẩn)" if item.is_hidden else html.escape(item.note)
+        price_display = "(ẩn)" if item.is_hidden else html.escape(item.price)
+        rows.append(
+            f"{badge} <b>#{item.id}</b> <code>{uid_display}</code> — {note_display} | 💰 {price_display}"
+        )
+    return "\n".join(rows)
