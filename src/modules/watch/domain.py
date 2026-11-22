@@ -218,7 +218,7 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
         f"📦 Tổng: <b>{stats.total}</b>"
     )
     return (
-        "👋 <b>CheckLiveBot</b>\n\n"
+        "👋 <b>Chào mừng đến với CheckLiveBot</b>\n\n"
         f"📊 {summary}\n\n"
         "✨ <b>Dùng nhanh:</b>\n"
         "• Chọn 1-4 nút ở dưới: <b>Lên kèo</b>, <b>Danh sách</b>, <b>Check nhanh</b>, <b>Thống kê</b>\n"

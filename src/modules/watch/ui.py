@@ -33,6 +33,10 @@ class RecheckAllCallback(CallbackData, prefix="ra"):
     pass
 
 
+class DashboardCallback(CallbackData, prefix="db"):
+    action: str
+
+
 class WatchActionCallback(CallbackData, prefix="w"):
     action: str
     watch_id: int
@@ -68,6 +72,33 @@ def build_reply_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         is_persistent=True,
+    )
+
+
+def build_dashboard_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=REPLY_BTN_ADD,
+                    callback_data=DashboardCallback(action="add").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=REPLY_BTN_LIST,
+                    callback_data=DashboardCallback(action="list").pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=REPLY_BTN_CHECK,
+                    callback_data=DashboardCallback(action="check").pack(),
+                ),
+                InlineKeyboardButton(
+                    text=REPLY_BTN_STATS,
+                    callback_data=DashboardCallback(action="stats").pack(),
+                ),
+            ],
+        ]
     )
 
 

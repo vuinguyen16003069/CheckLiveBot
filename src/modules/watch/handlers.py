@@ -26,6 +26,7 @@ from src.modules.watch.ui import (
     REPLY_BTN_LIST,
     REPLY_BTN_STATS,
     REPLY_SHORTCUTS,
+    DashboardCallback,
     DealDraft,
     ListPageCallback,
     QuickWatchCallback,
@@ -33,6 +34,7 @@ from src.modules.watch.ui import (
     WatchActionCallback,
     WizardCallback,
     WizardStates,
+    build_dashboard_keyboard,
     build_delete_confirm_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
@@ -101,9 +103,12 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
 
         stats = await watch_service.get_stats(message.chat.id)
+        tmp = await message.answer("⚡", reply_markup=build_reply_keyboard())
+        with contextlib.suppress(TelegramBadRequest):
+            await tmp.delete()
         await message.answer(
             format_welcome_dashboard(stats),
-            reply_markup=build_reply_keyboard(),
+            reply_markup=build_dashboard_keyboard(),
         )
 
     @router.message(Command("help"))
@@ -288,6 +293,34 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 format_live_notification(item),
                 reply_markup=build_watch_keyboard(item),
             )
+
+    @router.callback_query(DashboardCallback.filter())
+    async def cb_dashboard(
+        query: CallbackQuery,
+        callback_data: DashboardCallback,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        await state.clear()
+        action = callback_data.action
+        if action == "add":
+            await _start_wizard(msg, state, DealDraft(), step=1)
+        elif action == "list":
+            await _send_list_message(msg, watch_service, await _get_bot_username(bot))
+        elif action == "check":
+            await msg.answer(
+                "🔎 <b>Check nhanh LIVE / DIE</b>\n\n"
+                "Dán thẳng <b>1 UID / link Facebook</b>, <b>nhiều dòng UID</b> hoặc gửi <b>file .txt</b> "
+                "vào chat này — bot sẽ kiểm tra ngay!",
+            )
+        elif action == "stats":
+            stats = await watch_service.get_stats(msg.chat.id)
+            await msg.answer(format_watch_stats(stats))
+        await query.answer()
 
     @router.callback_query(RecheckAllCallback.filter())
     async def cb_recheck_all(query: CallbackQuery) -> None:
