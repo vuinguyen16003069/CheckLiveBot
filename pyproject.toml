@@ -1,0 +1,48 @@
+[project]
+name = "checklivebot"
+version = "0.1.0"
+description = "Telegram Bot check LIVE/DIE Facebook UID (Modular Clean Architecture, Redis RAM, ARQ, curl_cffi)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiogram>=3.13,<4.0",
+    "aiohttp>=3.10,<4.0",
+    "arq>=0.26,<1.0",
+    "curl-cffi>=0.7,<1.0",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.6,<3.0",
+    "redis>=5.2,<6.0",
+    "structlog>=24.4,<26.0",
+    "tenacity>=9.0,<10.0",
+    "uvloop>=0.21; sys_platform != 'win32'",
+]
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.26",
+    "pyright>=1.1.390",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-mock>=3.14",
+    "ruff>=0.7",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
+ignore = ["E501"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+include = ["main.py", "src", "tests"]
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]

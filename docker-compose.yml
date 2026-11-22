@@ -1,0 +1,46 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LOG_FORMAT: json
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    profiles: ["scale"]
+    command: ["arq", "main.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RUN_INLINE_WORKER: "false"
+      LOG_FORMAT: json
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis_data:
