@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import structlog
@@ -33,12 +33,31 @@ class WatchNotifierPort(Protocol):
 
 
 class RedisWatchRepository:
-    def __init__(self, redis: Redis, prefix: str = "checklivebot") -> None:
+    def __init__(
+        self,
+        redis: Redis,
+        prefix: str = "checklivebot",
+        live_retention_days: int = 60,
+    ) -> None:
         self._redis = redis
         self._prefix = prefix
+        self._live_retention_days = max(0, live_retention_days)
 
     def _k(self, suffix: str) -> str:
         return f"{self._prefix}:{suffix}"
+
+    @staticmethod
+    def _live_expiry_member(watch_id: int, chat_id: int, uid: str) -> str:
+        return f"{watch_id}:{chat_id}:{uid}"
+
+    def _live_ttl_and_expiry(self, item: WatchItem) -> tuple[int | None, float | None]:
+        if item.status == WatchStatus.LIVE and self._live_retention_days > 0:
+            base = item.live_detected_at or item.created_at
+            return (
+                self._live_retention_days * 86400,
+                (base + timedelta(days=self._live_retention_days)).timestamp(),
+            )
+        return None, None
 
     async def create(
         self,
@@ -67,8 +86,12 @@ class RedisWatchRepository:
             live_detected_at=now if status == WatchStatus.LIVE else None,
         )
         score = now.timestamp()
+        ttl_seconds, expires_at = self._live_ttl_and_expiry(item)
         async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json())
+            if ttl_seconds:
+                pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=ttl_seconds)
+            else:
+                pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json())
             pipe.zadd(self._k(f"watches:chat:{chat_id}"), {str(watch_id): score})
             pipe.zadd(
                 self._k(f"watches:chat:{chat_id}:status:{status.value}"),
@@ -77,6 +100,11 @@ class RedisWatchRepository:
             pipe.hset(self._k(f"chat_uid:{chat_id}"), uid, str(watch_id))
             if status == WatchStatus.DIE:
                 pipe.sadd(self._k("watches:die"), str(watch_id))
+            if expires_at is not None:
+                pipe.zadd(
+                    self._k("watches:live_expiry"),
+                    {self._live_expiry_member(watch_id, chat_id, uid): expires_at},
+                )
             await pipe.execute()
         return item
 
@@ -103,8 +131,12 @@ class RedisWatchRepository:
         previous_status: WatchStatus | None = None,
     ) -> WatchItem:
         score = item.created_at.timestamp()
+        ttl_seconds, expires_at = self._live_ttl_and_expiry(item)
         async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json())
+            if ttl_seconds:
+                pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=ttl_seconds)
+            else:
+                pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json())
             pipe.hset(self._k(f"chat_uid:{item.chat_id}"), item.uid, str(item.id))
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
@@ -119,6 +151,11 @@ class RedisWatchRepository:
                 pipe.sadd(self._k("watches:die"), str(item.id))
             else:
                 pipe.srem(self._k("watches:die"), str(item.id))
+
+            live_member = self._live_expiry_member(item.id, item.chat_id, item.uid)
+            pipe.zrem(self._k("watches:live_expiry"), live_member)
+            if expires_at is not None:
+                pipe.zadd(self._k("watches:live_expiry"), {live_member: expires_at})
             await pipe.execute()
         return item
 
@@ -132,6 +169,10 @@ class RedisWatchRepository:
             )
             pipe.srem(self._k("watches:die"), str(item.id))
             pipe.hdel(self._k(f"chat_uid:{item.chat_id}"), item.uid)
+            pipe.zrem(
+                self._k("watches:live_expiry"),
+                self._live_expiry_member(item.id, item.chat_id, item.uid),
+            )
             await pipe.execute()
 
     async def count_active_die(self, chat_id: int) -> int:
@@ -183,14 +224,49 @@ class RedisWatchRepository:
             pipe.zcard(self._k(f"watches:chat:{chat_id}:status:LIVE"))
             pipe.zcard(self._k(f"watches:chat:{chat_id}:status:DONE"))
             pipe.zcard(self._k(f"watches:chat:{chat_id}:status:CANCELLED"))
-            total, die, live, done, cancelled = await pipe.execute()
+            pipe.hgetall(self._k(f"stats:archived:{chat_id}"))
+            total, die, live, done, cancelled, archived = await pipe.execute()
+        archived_done = int((archived or {}).get("done", 0))
         return WatchStats(
-            total=int(total),
+            total=int(total) + archived_done,
             die=int(die),
             live=int(live),
-            done=int(done),
+            done=int(done) + archived_done,
             cancelled=int(cancelled),
         )
+
+    async def cleanup_expired(self, *, now: datetime | None = None) -> int:
+        """Auto-archive untouched LIVE watches older than 60 days into DONE stats and prune."""
+        if self._live_retention_days <= 0:
+            return 0
+        cutoff = (now or datetime.now(UTC)).timestamp()
+        members = await self._redis.zrangebyscore(self._k("watches:live_expiry"), "-inf", cutoff)
+        if not members:
+            return 0
+
+        cleaned = 0
+        async with self._redis.pipeline(transaction=True) as pipe:
+            for member in members:
+                parts = str(member).split(":", 2)
+                pipe.zrem(self._k("watches:live_expiry"), member)
+                if len(parts) != 3:
+                    continue
+                watch_id, chat_id, uid = parts
+                pipe.delete(self._k(f"watch:{watch_id}"))
+                pipe.zrem(self._k(f"watches:chat:{chat_id}"), watch_id)
+                pipe.zrem(self._k(f"watches:chat:{chat_id}:status:LIVE"), watch_id)
+                pipe.hdel(self._k(f"chat_uid:{chat_id}"), uid)
+                pipe.hincrby(self._k(f"stats:archived:{chat_id}"), "done", 1)
+                cleaned += 1
+            await pipe.execute()
+
+        if cleaned > 0:
+            logger.info(
+                "watch_live_cleanup_completed",
+                cleaned=cleaned,
+                live_retention_days=self._live_retention_days,
+            )
+        return cleaned
 
 
 class WatchService:

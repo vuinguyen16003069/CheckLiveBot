@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     concurrency: int = Field(default=100, ge=1, le=500, alias="CONCURRENCY")
     poll_interval_seconds: int = Field(default=10, ge=3, alias="POLL_INTERVAL_SECONDS")
+    live_retention_days: int = Field(default=60, ge=0, alias="LIVE_RETENTION_DAYS")
+    cleanup_interval_seconds: int = Field(default=21600, ge=60, alias="CLEANUP_INTERVAL_SECONDS")
     http_timeout_seconds: float = Field(default=5.0, gt=0.5, alias="HTTP_TIMEOUT_SECONDS")
     max_retries: int = Field(default=2, ge=1, le=10, alias="MAX_RETRIES")
     verify_delay_seconds: float = Field(default=0.5, ge=0.0, le=5.0, alias="VERIFY_DELAY_SECONDS")
