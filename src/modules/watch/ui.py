@@ -10,6 +10,13 @@ from pydantic import BaseModel
 from src.modules.watch.domain import WatchItem, WatchStatus
 
 
+class WizardStates(StatesGroup):
+    waiting_uid = State()
+    waiting_note = State()
+    waiting_price = State()
+    waiting_faq = State()
+
+
 class DealFormStates(StatesGroup):
     browsing = State()
     waiting_for_field = State()
@@ -48,6 +55,10 @@ class ListPageCallback(CallbackData, prefix="lp"):
 class DealFormCallback(CallbackData, prefix="df"):
     action: str
     field: str = ""
+
+
+class WizardCallback(CallbackData, prefix="wz"):
+    action: str
 
 
 class DealDraft(BaseModel):
@@ -185,6 +196,44 @@ def build_field_prompt_keyboard() -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def build_wizard_keyboard(allow_skip: bool = False) -> InlineKeyboardMarkup:
+    row: list[InlineKeyboardButton] = []
+    if allow_skip:
+        row.append(
+            InlineKeyboardButton(
+                text="⏭ Bỏ qua & Lên kèo",
+                callback_data=WizardCallback(action="skip_faq").pack(),
+            )
+        )
+    row.append(
+        InlineKeyboardButton(
+            text="❌ Hủy",
+            callback_data=WizardCallback(action="cancel").pack(),
+        )
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[row])
+
+
+def format_wizard_step(step: int, draft: DealDraft) -> str:
+    summary: list[str] = []
+    if draft.uid:
+        summary.append(f"🆔 UID: <code>{html.escape(draft.uid)}</code>")
+    if draft.note:
+        summary.append(f"📝 Ghi chú: {html.escape(draft.note)}")
+    if draft.price:
+        summary.append(f"💰 Giá: {html.escape(draft.price)}")
+
+    prompts = {
+        1: "🆔 <b>Bước 1/4 — Nhập UID</b> (hoặc link <code>profile.php?id=...</code>):",
+        2: "📝 <b>Bước 2/4 — Nhập ghi chú</b> cho kèo (VD: <code>Khách VIP A</code>):",
+        3: "💰 <b>Bước 3/4 — Nhập giá kèo</b> (VD: <code>50k</code>, <code>150.000</code>):",
+        4: "❓ <b>Bước 4/4 — Nhập FAQ / lưu ý thêm</b> (hoặc bấm <b>Bỏ qua &amp; Lên kèo</b>):",
+    }
+    header = "📌 <b>LÊN KÈO TỪNG BƯỚC</b>"
+    body = ("\n" + "\n".join(summary) + "\n") if summary else ""
+    return f"{header}\n{body}\n👉 {prompts[step]}"
 
 
 def build_cancel_keyboard() -> InlineKeyboardMarkup:

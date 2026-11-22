@@ -125,6 +125,28 @@ async def test_deal_form_ui_and_update_details() -> None:
     await redis.aclose()
 
 
+def test_wizard_steps_and_cancel_keyboard() -> None:
+    from src.modules.watch.ui import DealDraft, build_wizard_keyboard, format_wizard_step
+
+    draft = DealDraft()
+    assert "Bước 1/4" in format_wizard_step(1, draft)
+    kb1 = build_wizard_keyboard(allow_skip=False)
+    assert len(kb1.inline_keyboard[0]) == 1
+    assert "Hủy" in kb1.inline_keyboard[0][0].text
+
+    draft.uid = "100012345678901"
+    draft.note = "Khách A"
+    draft.price = "150k"
+    step4 = format_wizard_step(4, draft)
+    assert "Bước 4/4" in step4
+    assert "100012345678901" in step4
+    assert "Khách A" in step4
+    kb4 = build_wizard_keyboard(allow_skip=True)
+    assert len(kb4.inline_keyboard[0]) == 2
+    assert "Bỏ qua" in kb4.inline_keyboard[0][0].text
+    assert "Hủy" in kb4.inline_keyboard[0][1].text
+
+
 @pytest.mark.asyncio
 async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)

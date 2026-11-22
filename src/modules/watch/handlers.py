@@ -35,19 +35,23 @@ from src.modules.watch.ui import (
     QuickWatchCallback,
     SearchStates,
     WatchActionCallback,
+    WizardCallback,
+    WizardStates,
     build_cancel_keyboard,
     build_deal_form_keyboard,
     build_field_prompt_keyboard,
     build_list_keyboard,
     build_main_menu_keyboard,
     build_watch_keyboard,
+    build_wizard_keyboard,
     format_deal_form,
+    format_wizard_step,
 )
 
 WELCOME_TEXT = (
     "👋 <b>Chào mừng đến với CheckLiveBot!</b>\n\n"
     "✨ <b>Dùng cực nhanh bằng nút bấm UI hoặc lệnh:</b>\n"
-    "• Bấm <b>➕ Lên kèo</b> để mở Form bấm nút nào nhập mục đó\n"
+    "• Bấm <b>➕ Lên kèo</b> để nhập tuần tự <code>UID → Ghi chú → Giá → FAQ</code> (có nút Hủy xuyên suốt)\n"
     "• Hoặc dán thẳng <b>1 UID / link FB</b> / <b>nhiều dòng UID</b> / <b>file .txt</b>\n\n"
     "Chọn tính năng bên dưới hoặc gõ /help:"
 )
@@ -107,9 +111,74 @@ def create_watch_router(
     async def cmd_add(message: Message, command: CommandObject, state: FSMContext) -> None:
         raw = (command.args or "").strip()
         if not raw:
-            await _open_deal_form(message, state, DealDraft())
+            await _start_wizard(message, state, DealDraft(), step=1)
             return
         await _handle_upsert_watch(message, watch_service, raw)
+
+    @router.message(WizardStates.waiting_uid, F.text)
+    async def wizard_step_uid(message: Message, state: FSMContext) -> None:
+        uid = extract_uid((message.text or "").strip())
+        if not uid:
+            await message.answer(
+                "❌ UID không hợp lệ (cần 5–20 chữ số hoặc link <code>profile.php?id=...</code>).\n"
+                "👉 Vui lòng nhập lại <b>UID</b>:",
+                reply_markup=build_wizard_keyboard(),
+            )
+            return
+        draft = DealDraft(uid=uid)
+        await _start_wizard(message, state, draft, step=2)
+
+    @router.message(WizardStates.waiting_note, F.text)
+    async def wizard_step_note(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        draft = DealDraft.model_validate(data.get("wizard_draft", {}))
+        draft.note = (message.text or "").strip() or "Theo dõi nhanh"
+        await _start_wizard(message, state, draft, step=3)
+
+    @router.message(WizardStates.waiting_price, F.text)
+    async def wizard_step_price(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        draft = DealDraft.model_validate(data.get("wizard_draft", {}))
+        draft.price = (message.text or "").strip() or "0"
+        await _start_wizard(message, state, draft, step=4)
+
+    @router.message(WizardStates.waiting_faq, F.text)
+    async def wizard_step_faq(message: Message, state: FSMContext) -> None:
+        data = await state.get_data()
+        draft = DealDraft.model_validate(data.get("wizard_draft", {}))
+        raw_faq = (message.text or "").strip()
+        draft.faq = "" if raw_faq == "-" else raw_faq
+        user_id = message.from_user.id if message.from_user else 0
+        await _finalize_wizard(message, state, watch_service, draft, user_id)
+
+    @router.callback_query(WizardCallback.filter())
+    async def cb_wizard(
+        query: CallbackQuery,
+        callback_data: WizardCallback,
+        state: FSMContext,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        if callback_data.action == "cancel":
+            await state.clear()
+            await _safe_edit(msg, "🛑 Đã hủy lên kèo.", build_main_menu_keyboard())
+            await query.answer("Đã hủy.")
+            return
+        if callback_data.action == "skip_faq":
+            data = await state.get_data()
+            draft = DealDraft.model_validate(data.get("wizard_draft", {}))
+            if not draft.uid:
+                await state.clear()
+                await query.answer("Phiên nhập đã hết hạn, vui lòng thử lại.", show_alert=True)
+                return
+            draft.faq = ""
+            user_id = query.from_user.id if query.from_user else 0
+            await _finalize_wizard(msg, state, watch_service, draft, user_id, edit_existing=True)
+            await query.answer("✅ Đã lên kèo!")
+            return
+        await query.answer()
 
     @router.message(Command("addlist"))
     async def cmd_addlist(message: Message, state: FSMContext) -> None:
@@ -317,7 +386,7 @@ def create_watch_router(
             await state.clear()
             await _safe_edit(msg, WELCOME_TEXT, build_main_menu_keyboard())
         elif action == "add":
-            await _open_deal_form(msg, state, DealDraft(), edit_existing=True)
+            await _start_wizard(msg, state, DealDraft(), step=1, edit_existing=True)
         elif action == "addlist":
             await state.set_state(AddListStates.waiting_for_lines)
             await _safe_edit(
@@ -461,8 +530,8 @@ def create_watch_router(
         if not isinstance(msg, Message):
             await query.answer()
             return
-        await _open_deal_form(msg, state, DealDraft(uid=callback_data.uid), edit_existing=False)
-        await query.answer("📝 Đã mở Form lên kèo với UID sẵn!")
+        await _start_wizard(msg, state, DealDraft(uid=callback_data.uid), step=2)
+        await query.answer("📝 Đã điền sẵn UID — nhập ghi chú nhé!")
 
     @router.callback_query(ListPageCallback.filter())
     async def cb_list_page(query: CallbackQuery, callback_data: ListPageCallback) -> None:
@@ -565,6 +634,61 @@ def create_watch_router(
         await query.answer(toast)
 
     return router
+
+
+async def _start_wizard(
+    message: Message,
+    state: FSMContext,
+    draft: DealDraft,
+    *,
+    step: int,
+    edit_existing: bool = False,
+) -> None:
+    step_state = {
+        1: WizardStates.waiting_uid,
+        2: WizardStates.waiting_note,
+        3: WizardStates.waiting_price,
+        4: WizardStates.waiting_faq,
+    }[step]
+    await state.set_state(step_state)
+    await state.update_data(wizard_draft=draft.model_dump())
+    text = format_wizard_step(step, draft)
+    markup = build_wizard_keyboard(allow_skip=(step == 4))
+    if edit_existing:
+        await _safe_edit(message, text, markup)
+    else:
+        await message.answer(text, reply_markup=markup)
+
+
+async def _finalize_wizard(
+    message: Message,
+    state: FSMContext,
+    watch_service: WatchService,
+    draft: DealDraft,
+    user_id: int,
+    *,
+    edit_existing: bool = False,
+) -> None:
+    note = draft.note or "Theo dõi nhanh"
+    price = draft.price or "0"
+    raw_line = f"{draft.uid} | {note} | {price}"
+    if draft.faq:
+        raw_line += f" | {draft.faq}"
+
+    await state.clear()
+    try:
+        item, updated = await watch_service.upsert_watch(message.chat.id, user_id, raw_line)
+    except ValueError as exc:
+        await message.answer(f"❌ {exc}", reply_markup=build_main_menu_keyboard())
+        return
+
+    title = "♻️ Đã cập nhật kèo" if updated else "📌 Đã lên kèo thành công"
+    text = format_watch_card(item, title=title)
+    markup = build_watch_keyboard(item)
+    if edit_existing:
+        await _safe_edit(message, text, markup)
+    else:
+        await message.answer(text, reply_markup=markup)
 
 
 async def _open_deal_form(
