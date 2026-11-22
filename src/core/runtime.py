@@ -147,6 +147,8 @@ class WorkerSettings:
     redis_settings = build_arq_redis_settings(Settings().effective_redis_url)
     max_jobs = 10
     job_timeout = 3600
+    poll_delay = Settings().arq_poll_delay_seconds
+    health_check_interval = 3600
 
 
 def build_dispatcher(
@@ -229,6 +231,8 @@ def _start_inline_worker(
         "on_shutdown": worker_on_shutdown,
         "max_jobs": WorkerSettings.max_jobs,
         "job_timeout": WorkerSettings.job_timeout,
+        "poll_delay": settings.arq_poll_delay_seconds,
+        "health_check_interval": 3600,
     }
     worker = create_worker(
         worker_settings,

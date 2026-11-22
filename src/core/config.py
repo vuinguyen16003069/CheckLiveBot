@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     concurrency: int = Field(default=50, ge=1, le=500, alias="CONCURRENCY")
     poll_interval_seconds: int = Field(default=30, ge=5, alias="POLL_INTERVAL_SECONDS")
+    arq_poll_delay_seconds: float = Field(default=5.0, ge=0.5, alias="ARQ_POLL_DELAY_SECONDS")
     http_timeout_seconds: float = Field(default=10.0, gt=0.5, alias="HTTP_TIMEOUT_SECONDS")
     max_retries: int = Field(default=3, ge=1, le=10, alias="MAX_RETRIES")
     check_cache_ttl_seconds: int = Field(default=600, ge=0, alias="CHECK_CACHE_TTL_SECONDS")
