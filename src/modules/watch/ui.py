@@ -29,6 +29,10 @@ class WizardStates(StatesGroup):
     waiting_faq = State()
 
 
+class ListLookupStates(StatesGroup):
+    waiting_uid = State()
+
+
 class RecheckAllCallback(CallbackData, prefix="ra"):
     pass
 
@@ -215,10 +219,6 @@ def build_watch_keyboard(
     if item.status == WatchStatus.DIE:
         rows.append(
             [
-                InlineKeyboardButton(
-                    text="🔄 Kiểm tra lại",
-                    callback_data=WatchActionCallback(action="recheck", watch_id=item.id).pack(),
-                ),
                 InlineKeyboardButton(
                     text="❌ Hủy kèo",
                     callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),

@@ -8,7 +8,6 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import extract_uid
 from src.modules.watch.domain import (
     WatchItem,
@@ -28,6 +27,7 @@ from src.modules.watch.ui import (
     REPLY_SHORTCUTS,
     DashboardCallback,
     DealDraft,
+    ListLookupStates,
     ListPageCallback,
     QuickWatchCallback,
     RecheckAllCallback,
@@ -127,7 +127,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if text == REPLY_BTN_ADD:
             await _start_wizard(message, state, DealDraft(), step=1)
         elif text == REPLY_BTN_LIST:
-            await _send_list_message(message, watch_service, await _get_bot_username(bot))
+            await _send_list_message(message, state, watch_service, await _get_bot_username(bot))
         elif text == REPLY_BTN_CHECK:
             await message.answer(
                 "🔎 <b>Check nhanh LIVE / DIE</b>\n\n"
@@ -261,8 +261,29 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await query.answer()
 
     @router.message(Command("list"))
-    async def cmd_list(message: Message, bot: Bot) -> None:
-        await _send_list_message(message, watch_service, await _get_bot_username(bot))
+    async def cmd_list(message: Message, state: FSMContext, bot: Bot) -> None:
+        await _send_list_message(message, state, watch_service, await _get_bot_username(bot))
+
+    @router.message(ListLookupStates.waiting_uid, F.text, ~F.text.startswith("/"))
+    async def handle_list_lookup(message: Message) -> None:
+        raw = (message.text or "").strip()
+        uid = extract_uid(raw)
+        if not uid:
+            await message.answer(
+                "❌ UID chưa đúng (cần 5–20 chữ số hoặc link Facebook cá nhân).\n"
+                "👉 Nhắn lại <b>UID / link</b> để tra cứu kèo."
+            )
+            return
+        item = await watch_service.find_by_uid(message.chat.id, uid)
+        if item is None:
+            await message.answer(
+                f"📭 Không tìm thấy kèo nào có UID <code>{uid}</code> trong danh sách."
+            )
+            return
+        await message.answer(
+            format_watch_card(item),
+            reply_markup=build_watch_keyboard(item, back_status="ALL", back_page=1),
+        )
 
     @router.message(Command("stats"))
     async def cmd_stats(message: Message) -> None:
@@ -285,7 +306,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if action == "add":
             await _start_wizard(msg, state, DealDraft(), step=1)
         elif action == "list":
-            await _send_list_message(msg, watch_service, await _get_bot_username(bot))
+            await _send_list_message(msg, state, watch_service, await _get_bot_username(bot))
         elif action == "check":
             await msg.answer(
                 "🔎 <b>Check nhanh LIVE / DIE</b>\n\n"
@@ -342,12 +363,14 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def cb_list_page(
         query: CallbackQuery,
         callback_data: ListPageCallback,
+        state: FSMContext,
         bot: Bot,
     ) -> None:
         msg = query.message
         if not isinstance(msg, Message):
             await query.answer()
             return
+        await state.set_state(ListLookupStates.waiting_uid)
         status_filter = WatchStatus(callback_data.status) if callback_data.status != "ALL" else None
         items, total, total_pages = await watch_service.list_watches(
             msg.chat.id,
@@ -429,17 +452,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
             elif action == "continue":
                 item = await watch_service.mark_status(msg.chat.id, watch_id, WatchStatus.DIE)
                 toast = "🔄 Đã tiếp tục theo dõi kèo."
-            elif action == "recheck":
-                item, outcome = await watch_service.recheck_one(msg.chat.id, watch_id)
-                toast = (
-                    "🎉 UID đã về LIVE!"
-                    if outcome == CheckOutcome.LIVE
-                    else (
-                        "🔴 UID vẫn DIE."
-                        if outcome == CheckOutcome.DIE
-                        else "⚠️ Lỗi mạng, thử lại sau."
-                    )
-                )
             else:
                 await query.answer("Hành động không hợp lệ.", show_alert=True)
                 return
@@ -455,9 +467,11 @@ def create_watch_router(watch_service: WatchService) -> Router:
 
 async def _send_list_message(
     message: Message,
+    state: FSMContext,
     watch_service: WatchService,
     bot_username: str | None = None,
 ) -> None:
+    await state.set_state(ListLookupStates.waiting_uid)
     items, total, total_pages = await watch_service.list_watches(message.chat.id, page=1)
     text = format_watch_list(
         items,

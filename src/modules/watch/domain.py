@@ -206,7 +206,9 @@ def format_watch_list(
             f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
         )
     if bot_username:
-        rows.append("\n<i>💡 Chạm vào UID để xem chi tiết kèo.</i>")
+        rows.append("\n<i>⇨ Chạm vào UID để xem chi tiết kèo hoặc nhắn UID / link để tra cứu.</i>")
+    else:
+        rows.append("\n<i>⇨ Nhắn UID hoặc link Facebook để tra cứu nhanh chi tiết kèo.</i>")
     return "\n".join(rows)
 
 
