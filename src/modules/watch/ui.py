@@ -226,10 +226,6 @@ def build_watch_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✏️ Sửa",
-                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
                     text="❌ Hủy kèo",
                     callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
                 ),
@@ -239,15 +235,20 @@ def build_watch_keyboard(
                 ),
             ]
         )
-        if back_status is not None:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Về danh sách",
-                        callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
-                    )
-                ]
+        footer_row: list[InlineKeyboardButton] = [
+            InlineKeyboardButton(
+                text="✏️ Sửa",
+                callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
             )
+        ]
+        if back_status is not None:
+            footer_row.append(
+                InlineKeyboardButton(
+                    text="🔙 Về danh sách",
+                    callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
+                )
+            )
+        rows.append(footer_row)
     else:
         rows.append(
             [
