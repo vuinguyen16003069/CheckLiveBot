@@ -145,9 +145,10 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
     }[item.status]
     lines.append(f"🔄 <b>Tiến trình:</b> {progress_label}")
 
-    display_time = item.live_detected_at or item.last_checked_at or item.created_at
     aware_time = (
-        display_time if display_time.tzinfo is not None else display_time.replace(tzinfo=UTC)
+        item.created_at
+        if item.created_at.tzinfo is not None
+        else item.created_at.replace(tzinfo=UTC)
     )
     vn_time = aware_time.astimezone(timezone(timedelta(hours=7))).strftime("%H:%M:%S %d/%m/%Y")
     lines.append(f"🕒 <b>Thời gian:</b> {_spoiler(vn_time, item.is_hidden)}")

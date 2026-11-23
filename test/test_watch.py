@@ -142,6 +142,8 @@ def test_parse_add_line_duration_and_card_formatting() -> None:
     assert "282 → LIVE ✅" in live_text
     assert "30 phút" in live_text
     assert "0đ" in live_text
+    # Always displays created_at (10:00 UTC = 17:00:00 VN), NOT live_detected_at (17:30:00)
+    assert "17:00:00 01/01/2026" in live_text
 
     done_card = format_watch_card(
         item.model_copy(update={"status": WatchStatus.DONE, "price": "500"})
