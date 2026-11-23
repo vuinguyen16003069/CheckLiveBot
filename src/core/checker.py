@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from itertools import cycle
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from curl_cffi.requests import AsyncSession
@@ -37,7 +37,7 @@ class CurlCffiFacebookChecker:
         timeout_seconds: float = 5.0,
         max_retries: int = 2,
         proxies: Sequence[str] | None = None,
-        session: AsyncSession | None = None,
+        session: AsyncSession[Any] | None = None,
         verify_delay_seconds: float = 0.5,
         max_clients: int = 100,
     ) -> None:
@@ -46,7 +46,7 @@ class CurlCffiFacebookChecker:
         self._verify_delay = max(0.0, verify_delay_seconds)
         self._proxy_pool = ProxyPool(proxies)
         self._owns_session = session is None
-        self._session = session or AsyncSession(
+        self._session: AsyncSession[Any] = session or AsyncSession(
             impersonate="chrome",
             max_clients=max(10, max_clients),
         )
@@ -91,7 +91,7 @@ class CurlCffiFacebookChecker:
             kwargs["proxy"] = proxy
 
         try:
-            response = await self._session.get(url, **kwargs)
+            response: Any = await self._session.get(url, **kwargs)
         except Exception as exc:
             raise _RetryableCheckError(f"request_failed: {exc}") from exc
 
@@ -100,7 +100,7 @@ class CurlCffiFacebookChecker:
             raise _RetryableCheckError(f"http_{status}")
 
         try:
-            payload = response.json()
+            payload: Any = response.json()
         except Exception as exc:
             if status == 404:
                 return CheckOutcome.DIE, "http_404"
@@ -137,19 +137,21 @@ def parse_graph_picture_payload(
     if not isinstance(payload, dict):
         return CheckOutcome.ERROR, f"unexpected_payload_http_{status_code}"
 
-    if "error" in payload:
+    payload_dict = cast(dict[str, Any], payload)
+    if "error" in payload_dict:
         return CheckOutcome.DIE, "graph_error"
 
-    data = payload.get("data")
-    if not isinstance(data, dict):
+    data_raw = payload_dict.get("data")
+    if not isinstance(data_raw, dict):
         return CheckOutcome.DIE, f"no_data_http_{status_code}"
 
+    data = cast(dict[str, Any], data_raw)
     if not _has_valid_avatar(data):
         return CheckOutcome.DIE, "missing_avatar_dimensions"
 
+    url_lower = str(data["url"]).lower()
     if data.get("is_silhouette") and any(
-        marker in data["url"].lower()
-        for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
+        marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
     ):
         return CheckOutcome.DIE, "silhouette_placeholder"
 

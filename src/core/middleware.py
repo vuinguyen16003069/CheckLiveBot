@@ -23,7 +23,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         cutoff = now - 60.0
         window = self._windows.get(user_id)
         if window is None:
-            window = deque()
+            window = deque[float]()
             self._windows[user_id] = window
         while window and window[0] <= cutoff:
             window.popleft()

@@ -71,7 +71,8 @@ def test_extract_uids_deduplicates_large_input_and_progress_bar() -> None:
     fname, content = build_combined_result_file(["10001"], ["10002"], [], "abc123")
     assert fname == "result_abc123.txt"
     decoded = content.decode("utf-8")
-    assert "=== LIVE (1) ===" in decoded and "=== DIE (1) ===" in decoded
+    assert "=== LIVE (1) ===" in decoded
+    assert "=== DIE (1) ===" in decoded
 
 
 @pytest.mark.asyncio
@@ -101,7 +102,9 @@ async def test_bulk_check_service_runs_in_memory_and_sends_results() -> None:
         status_message_id=77,
         notifier=notifier,
     )
-    assert job_id and total == 4 and skipped == 1
+    assert job_id
+    assert total == 4
+    assert skipped == 1
 
     await asyncio.wait_for(notifier.done.wait(), timeout=5.0)
     assert checker.called.count("100001") == 2

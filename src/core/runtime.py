@@ -95,7 +95,7 @@ async def run_bot(settings: Settings) -> None:
         raise RuntimeError("BOT_TOKEN is required. Copy .env.example to .env and set BOT_TOKEN.")
 
     redis = create_redis_client(settings.redis_url)
-    await redis.ping()  # type: ignore[misc]
+    await redis.ping()
     logger.info("redis_connected")
 
     checker = CurlCffiFacebookChecker(

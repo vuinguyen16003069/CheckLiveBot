@@ -98,7 +98,7 @@ def test_parse_add_line_and_html_escape_and_spoiler() -> None:
     assert "<tg-spoiler>100012345678901</tg-spoiler>" in hidden_card
     assert "<b>Thời gian:</b> <tg-spoiler>" in hidden_card
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="UID không hợp lệ"):
         parse_add_line("invalid_line")
 
     bare = parse_add_line("100012345678901")
@@ -134,7 +134,8 @@ def test_ui_keyboards_and_wizard_recovery() -> None:
     assert "Tổng số kèo: <b>10</b>" in format_watch_stats(stats)
 
     rk = build_reply_keyboard()
-    assert len(rk.keyboard) == 2 and len(rk.keyboard[0]) == 2
+    assert len(rk.keyboard) == 2
+    assert len(rk.keyboard[0]) == 2
 
     draft = DealDraft()
     assert "Bước 1/4" in format_wizard_step(1, draft)
@@ -187,7 +188,7 @@ async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
     assert w1.status == WatchStatus.DIE
     assert w2.status == WatchStatus.LIVE
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Không tìm thấy kèo"):
         await svc.mark_status(chat_id=200, watch_id=w1.id, new_status=WatchStatus.DONE)
 
     w1_hidden = await svc.set_hidden(chat_id=100, watch_id=w1.id, hidden=True)
@@ -203,7 +204,9 @@ async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
     assert w1_resumed.status == WatchStatus.DIE
 
     items, total, pages = await svc.list_watches(chat_id=100, status_filter=WatchStatus.DIE, page=1)
-    assert total == 1 and pages == 1 and items[0].id == w1.id
+    assert total == 1
+    assert pages == 1
+    assert items[0].id == w1.id
     await redis.aclose()
 
 

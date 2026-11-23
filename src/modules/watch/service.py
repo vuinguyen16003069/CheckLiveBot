@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 import structlog
 from redis.asyncio import Redis
@@ -109,7 +109,7 @@ class RedisWatchRepository:
         return item
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
-        raw_id = await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))  # type: ignore[misc]
         if not raw_id:
             return None
         item = await self.get(int(raw_id))
@@ -179,7 +179,7 @@ class RedisWatchRepository:
         return int(await self._redis.zcard(self._k(f"watches:chat:{chat_id}:status:DIE")))
 
     async def list_die_items(self) -> list[WatchItem]:
-        ids = await self._redis.smembers(self._k("watches:die"))  # type: ignore[misc]
+        ids = cast(set[str], await self._redis.smembers(self._k("watches:die")))  # type: ignore[misc]
         if not ids:
             return []
         keys = [self._k(f"watch:{wid}") for wid in ids]
@@ -226,7 +226,8 @@ class RedisWatchRepository:
             pipe.zcard(self._k(f"watches:chat:{chat_id}:status:CANCELLED"))
             pipe.hgetall(self._k(f"stats:archived:{chat_id}"))
             total, die, live, done, cancelled, archived = await pipe.execute()
-        archived_done = int((archived or {}).get("done", 0))
+        archived_map: dict[str, Any] = archived or {}
+        archived_done = int(archived_map.get("done", 0))
         return WatchStats(
             total=int(total) + archived_done,
             die=int(die),

@@ -1,6 +1,6 @@
 [project]
 name = "checklivebot"
-version = "0.1.0"
+version = "1.0.0"
 description = "Telegram Bot check LIVE/DIE Facebook UID (Single-Process Asyncio, Redis RAM, curl_cffi)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,18 +30,34 @@ line-length = 100
 cache-dir = "~/.cache/ruff/checklivebot"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC"]
-ignore = ["E501"]
+select = [
+    "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "DTZ",
+    "PIE", "PT", "Q", "RSE", "RET", "SIM", "TID", "ARG",
+    "PTH", "PERF", "FURB", "LOG", "RUF", "ASYNC", "S",
+]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+"test/**/*.py" = ["S101", "S105", "S106", "ARG"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-typeCheckingMode = "standard"
+typeCheckingMode = "strict"
 include = ["main.py", "src", "test"]
 reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
+reportDuplicateImport = "error"
+strictListInference = true
+strictDictionaryInference = true
+strictSetInference = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = ["-p", "no:cacheprovider"]
+addopts = ["-p", "no:cacheprovider", "--strict-markers", "--strict-config", "-ra"]
+filterwarnings = ["error"]
 testpaths = ["test"]
 pythonpath = ["."]

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import sys
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # Đảm bảo import được module src từ thư mục gốc khi chạy trực tiếp bằng nút Run
 _ROOT = str(Path(__file__).resolve().parent.parent)
@@ -43,10 +45,8 @@ async def get_value_by_type(r: Redis, key: str, key_type: str, full: bool = Fals
     if key_type == "string":
         raw = await r.get(key)
         if isinstance(raw, str):
-            try:
+            with contextlib.suppress(ValueError):
                 return json.loads(raw)
-            except Exception:
-                pass
             if not full and len(raw) > 200:
                 return raw[:200] + "... (truncated)"
         return raw
@@ -56,7 +56,7 @@ async def get_value_by_type(r: Redis, key: str, key_type: str, full: bool = Fals
     if key_type == "list":
         return await r.lrange(key, 0, -1)  # type: ignore[misc]
     if key_type == "set":
-        members = await r.smembers(key)  # type: ignore[misc]
+        members = cast(set[str], await r.smembers(key))  # type: ignore[misc]
         return sorted(members)
     if key_type == "zset":
         return await r.zrange(key, 0, -1, withscores=True)
@@ -66,7 +66,8 @@ async def get_value_by_type(r: Redis, key: str, key_type: str, full: bool = Fals
 
 async def get_all_keys(r: Redis, pattern: str = "*") -> list[str]:
     """Lấy danh sách tất cả các key theo pattern và sắp xếp alphabet."""
-    keys = [str(k) async for k in r.scan_iter(match=pattern, count=500)]
+    iterator = cast(AsyncIterator[str], r.scan_iter(match=pattern, count=500))
+    keys = [k async for k in iterator]
     return sorted(keys)
 
 
@@ -166,11 +167,11 @@ async def show_json_dump(r: Redis, pattern: str = "*", full: bool = False) -> No
 
 def save_dump_file(filename: str, data: dict[str, Any]) -> str:
     """Ghi dữ liệu JSON ra tệp tin."""
-    target_path = str(Path(filename).resolve())
-    Path(target_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(target_path, "w", encoding="utf-8") as f:
+    target = Path(filename).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    return target_path
+    return str(target)
 
 
 async def export_db_to_json(
@@ -268,7 +269,7 @@ async def show_group_details(r: Redis, group_name: str, keys: list[str]) -> None
 async def run_interactive_menu(r: Redis, prefix: str) -> None:
     """Giao diện CLI tương tác đa tính năng."""
     try:
-        if not await r.ping():  # type: ignore[misc]
+        if not await r.ping():
             print(f"{C_RED}❌ Không thể kết nối tới Redis! Kiểm tra REDIS_URL trong .env{C_RESET}")
             return
     except Exception as exc:
