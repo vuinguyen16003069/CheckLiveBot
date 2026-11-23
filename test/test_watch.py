@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import fakeredis.aioredis
 import pytest
@@ -194,7 +196,7 @@ async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
     w1_hidden = await svc.set_hidden(chat_id=100, watch_id=w1.id, hidden=True)
     assert w1_hidden.is_hidden is True
     ttl_pref = await redis.ttl("test:pref:hidden:100")
-    assert 29 * 86400 < ttl_pref <= 30 * 86400
+    assert 89 * 86400 < ttl_pref <= 90 * 86400
     # Global per-chat hide preference applies to all other watches in chat 100
     w2_loaded = await svc.get_watch(chat_id=100, watch_id=w2.id)
     assert w2_loaded.is_hidden is True
@@ -256,58 +258,52 @@ async def test_watcher_double_verify_prevents_false_live_and_extracts_fb_name() 
 
 
 @pytest.mark.asyncio
-async def test_live_60d_cleanup_archives_to_done_and_protects_others() -> None:
+async def test_unified_90d_ttl_on_all_keys_and_cleanup() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    repo = RedisWatchRepository(redis, prefix="test", live_retention_days=60)
+    repo = RedisWatchRepository(redis, prefix="test", ttl_days=90)
     checker = _StubChecker(
         {
             "100001": CheckOutcome.DIE,
             "100002": CheckOutcome.LIVE,
             "100003": CheckOutcome.DIE,
-            "100004": CheckOutcome.LIVE,
         }
     )
     svc = WatchService(repo=repo, checker=checker)
 
-    w_die = await svc.add_watch(100, 1, "100001 | Active DIE | 10k")
-    w_live_recent = await svc.add_watch(100, 1, "100002 | Recent LIVE | 20k")
-    w_done = await svc.add_watch(100, 1, "100003 | Done Deal | 30k")
-    w_live_old = await svc.add_watch(100, 1, "100004 | Forgotten LIVE | 50k")
-
-    # Only LIVE gets 60-day TTL; DIE and DONE have no TTL
-    assert await redis.ttl(f"test:watch:{w_die.id}") == -1
-    ttl_live = await redis.ttl(f"test:watch:{w_live_recent.id}")
-    assert 59 * 86400 < ttl_live <= 60 * 86400
-
+    w_die = await svc.add_watch(100, 1, "100001 | Old DIE | 10k")
+    w_live = await svc.add_watch(100, 1, "100002 | Recent LIVE | 20k")
+    w_done = await svc.add_watch(100, 1, "100003 | Old Done | 30k")
     w_done = await svc.mark_status(100, w_done.id, WatchStatus.DONE)
-    assert await redis.ttl(f"test:watch:{w_done.id}") == -1
+    await svc.set_hidden(100, w_die.id, True)
 
-    # Resuming LIVE -> DIE removes TTL
-    w_live_recent = await svc.mark_status(100, w_live_recent.id, WatchStatus.DIE)
-    assert await redis.ttl(f"test:watch:{w_live_recent.id}") == -1
-    w_live_recent.status = WatchStatus.LIVE
-    await repo.update(w_live_recent, previous_status=WatchStatus.DIE)
+    # Every single key in Redis MUST have ~90-day TTL (zero permanent no-ttl keys)
+    all_keys = [k async for k in cast(AsyncIterator[str], redis.scan_iter("*"))]
+    assert len(all_keys) > 0
+    for key in all_keys:
+        ttl = await redis.ttl(key)
+        assert 89 * 86400 < ttl <= 90 * 86400, f"Key {key} missing 90d TTL (ttl={ttl})"
 
-    # Backdate forgotten LIVE to 65 days ago & simulate Redis TTL eviction
+    # Backdate w_die (95d ago) and w_done (95d ago); keep w_live recent (10d ago)
     now = datetime.now(UTC)
-    w_live_old.live_detected_at = now - timedelta(days=65)
-    await repo.update(w_live_old)
-    await redis.delete(f"test:watch:{w_live_old.id}")
+    w_die.last_checked_at = now - timedelta(days=95)
+    await repo.update(w_die)
+    w_done.completed_at = now - timedelta(days=95)
+    await repo.update(w_done)
+    w_live.live_detected_at = now - timedelta(days=10)
+    await repo.update(w_live)
 
     cleaned = await repo.cleanup_expired(now=now)
-    assert cleaned == 1
+    assert cleaned == 2
 
-    # DIE, DONE, and recent LIVE remain untouched; forgotten LIVE (>60d) pruned
-    assert await repo.get(w_die.id) is not None
-    assert await repo.get(w_done.id) is not None
-    assert await repo.get(w_live_recent.id) is not None
-    assert await repo.get(w_live_old.id) is None
+    # Only recent w_live remains; stats reflect the 3-month window accurately
+    assert await repo.get(w_live.id) is not None
+    assert await repo.get(w_die.id) is None
+    assert await repo.get(w_done.id) is None
 
-    # Forgotten LIVE archived into DONE stats (done=2, live=1, die=1, total=4)
     stats = await svc.get_stats(100)
-    assert (stats.total, stats.die, stats.live, stats.done, stats.cancelled) == (4, 1, 1, 2, 0)
+    assert (stats.total, stats.die, stats.live, stats.done, stats.cancelled) == (1, 0, 1, 0, 0)
 
-    # Pruned UID is unlocked for re-adding
-    re_added = await svc.add_watch(100, 1, "100004 | New Deal | 50k")
-    assert re_added.uid == "100004"
+    # Expired UID is unlocked for re-adding
+    re_added = await svc.add_watch(100, 1, "100001 | Re-added | 50k")
+    assert re_added.uid == "100001"
     await redis.aclose()

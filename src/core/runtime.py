@@ -83,7 +83,7 @@ async def run_bot(settings: Settings) -> None:
     repo = RedisWatchRepository(
         redis,
         prefix=settings.redis_key_prefix,
-        live_retention_days=settings.live_retention_days,
+        ttl_days=settings.data_ttl_days,
     )
     bot = Bot(
         token=settings.bot_token,
