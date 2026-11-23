@@ -24,6 +24,7 @@ from src.modules.bulk.domain import (
     build_combined_result_file,
     extract_uid,
     extract_uids_from_text,
+    format_bulk_progress,
     format_single_check,
 )
 from src.modules.bulk.service import BulkCheckService
@@ -196,16 +197,20 @@ async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: st
     if message.bot is None:
         return
     try:
-        job_id, uids, skipped = bulk_service.prepare_bulk_text(text)
+        job_id, uids, _ = bulk_service.prepare_bulk_text(text)
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
 
-    extra = f" (đã lọc bỏ {skipped:,} dòng trùng/lỗi)" if skipped else ""
     status_msg = await message.answer(
-        f"📥 <b>Đã nhận {len(uids):,} UID</b>{extra}\n"
-        f"🆔 Mã phiên: <code>#{job_id}</code>\n"
-        "⚙️ Bot đang kiểm tra ngay và sẽ cập nhật tiến độ liên tục..."
+        format_bulk_progress(
+            job_id=job_id,
+            done=0,
+            total=len(uids),
+            live=0,
+            die=0,
+            error=0,
+        )
     )
     bulk_service.start_bulk_uids(
         job_id=job_id,

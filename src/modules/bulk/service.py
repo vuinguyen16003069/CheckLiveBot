@@ -133,8 +133,6 @@ class BulkCheckService:
                 )
                 await notifier.update_progress(chat_id, status_message_id, text)
 
-        await _maybe_update(force=True)
-
         uid_queue: asyncio.Queue[str] = asyncio.Queue()
         for uid in uids:
             uid_queue.put_nowait(uid)
