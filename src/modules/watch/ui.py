@@ -13,7 +13,7 @@ from aiogram.types import (
 )
 from pydantic import BaseModel
 
-from src.modules.watch.domain import WatchItem, WatchStatus
+from src.modules.watch.domain import WatchItem, WatchStatus, format_watch_card
 
 REPLY_BTN_ADD = "➕ Lên kèo"
 REPLY_BTN_LIST = "📋 Danh sách"
@@ -31,6 +31,10 @@ class WizardStates(StatesGroup):
 
 class ListLookupStates(StatesGroup):
     waiting_uid = State()
+
+
+class EditWatchStates(StatesGroup):
+    waiting_value = State()
 
 
 class RecheckAllCallback(CallbackData, prefix="ra"):
@@ -57,6 +61,13 @@ class ListPageCallback(CallbackData, prefix="lp"):
 
 class WizardCallback(CallbackData, prefix="wz"):
     action: str
+    value: str = ""
+
+
+class EditWatchCallback(CallbackData, prefix="ew"):
+    action: str
+    watch_id: int
+    field: str = ""
     value: str = ""
 
 
@@ -215,6 +226,10 @@ def build_watch_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
+                    text="✏️ Sửa",
+                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
+                ),
+                InlineKeyboardButton(
                     text="❌ Hủy kèo",
                     callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
                 ),
@@ -224,6 +239,15 @@ def build_watch_keyboard(
                 ),
             ]
         )
+        if back_status is not None:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="🔙 Về danh sách",
+                        callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
+                    )
+                ]
+            )
     else:
         rows.append(
             [
@@ -240,8 +264,8 @@ def build_watch_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✅ Tiếp tục theo dõi",
-                    callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
+                    text="✏️ Sửa",
+                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
                 ),
                 InlineKeyboardButton(
                     text="🗑 Xóa",
@@ -249,17 +273,122 @@ def build_watch_keyboard(
                 ),
             ]
         )
-
-    if back_status is not None:
-        rows.append(
-            [
+        footer_row: list[InlineKeyboardButton] = [
+            InlineKeyboardButton(
+                text="🔄 Tiếp tục theo dõi",
+                callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
+            )
+        ]
+        if back_status is not None:
+            footer_row.append(
                 InlineKeyboardButton(
                     text="🔙 Về danh sách",
                     callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
                 )
+            )
+        rows.append(footer_row)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_edit_menu_keyboard(watch_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📝 Ghi chú",
+                    callback_data=EditWatchCallback(
+                        action="field", watch_id=watch_id, field="note"
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="💰 Giá",
+                    callback_data=EditWatchCallback(
+                        action="field", watch_id=watch_id, field="price"
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="⚠️ FAQ",
+                    callback_data=EditWatchCallback(
+                        action="field", watch_id=watch_id, field="faq"
+                    ).pack(),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Quay lại",
+                    callback_data=EditWatchCallback(action="back", watch_id=watch_id).pack(),
+                )
+            ],
+        ]
+    )
+
+
+def build_edit_field_keyboard(watch_id: int, field: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if field == "price":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=EditWatchCallback(
+                        action="pick", watch_id=watch_id, field="price", value=val
+                    ).pack(),
+                )
+                for label, val in (
+                    ("0đ", "0"),
+                    ("50k", "50k"),
+                    ("100k", "100k"),
+                    ("200k", "200k"),
+                    ("500k", "500k"),
+                )
             ]
         )
+    elif field == "faq":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=val,
+                    callback_data=EditWatchCallback(
+                        action="pick", watch_id=watch_id, field="faq", value=val
+                    ).pack(),
+                )
+                for val in ("282", "956", "583", "Toàn vẹn")
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🗑 Xóa FAQ",
+                    callback_data=EditWatchCallback(
+                        action="pick", watch_id=watch_id, field="faq", value=""
+                    ).pack(),
+                ),
+                InlineKeyboardButton(
+                    text="🔙 Quay lại",
+                    callback_data=EditWatchCallback(action="menu", watch_id=watch_id).pack(),
+                ),
+            ]
+        )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🔙 Quay lại",
+                callback_data=EditWatchCallback(action="menu", watch_id=watch_id).pack(),
+            )
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_edit_prompt(item: WatchItem, field: str) -> str:
+    prompts = {
+        "note": "📝 Nhập <b>ghi chú mới</b> cho kèo này:",
+        "price": "💰 Chọn nhanh <b>giá mới</b> bên dưới hoặc nhắn giá bất kỳ:",
+        "faq": "⚠️ Chọn nhanh <b>FAQ mới</b> bên dưới hoặc nhắn nội dung bất kỳ:",
+    }
+    return f"{format_watch_card(item, title='✏️ Đang sửa kèo')}\n\n👉 {prompts[field]}"
 
 
 def build_delete_confirm_keyboard(watch_id: int) -> InlineKeyboardMarkup:

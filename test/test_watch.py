@@ -28,9 +28,13 @@ from src.modules.watch.service import (
 from src.modules.watch.ui import (
     DealDraft,
     build_delete_confirm_keyboard,
+    build_edit_field_keyboard,
+    build_edit_menu_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
+    build_watch_keyboard,
     build_wizard_keyboard,
+    format_edit_prompt,
     format_wizard_step,
     recover_draft_from_text,
 )
@@ -168,6 +172,24 @@ def test_ui_keyboards_and_wizard_recovery() -> None:
     del_kb = build_delete_confirm_keyboard(7)
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
 
+    die_kb = build_watch_keyboard(sample_item)
+    die_texts = [btn.text for row in die_kb.inline_keyboard for btn in row]
+    assert "✏️ Sửa" in die_texts
+
+    live_item = sample_item.model_copy(update={"status": WatchStatus.LIVE})
+    live_kb = build_watch_keyboard(live_item)
+    live_texts = [btn.text for row in live_kb.inline_keyboard for btn in row]
+    assert "✏️ Sửa" in live_texts
+    assert "🔄 Tiếp tục theo dõi" in live_texts
+
+    edit_menu = build_edit_menu_keyboard(7)
+    assert [btn.text for btn in edit_menu.inline_keyboard[0]] == ["📝 Ghi chú", "💰 Giá", "⚠️ FAQ"]
+    price_kb = build_edit_field_keyboard(7, "price")
+    assert any(btn.text == "100k" for btn in price_kb.inline_keyboard[0])
+    faq_kb = build_edit_field_keyboard(7, "faq")
+    assert any(btn.text == "🗑 Xóa FAQ" for row in faq_kb.inline_keyboard for btn in row)
+    assert "ghi chú mới" in format_edit_prompt(sample_item, "note")
+
     recovered = recover_draft_from_text(
         "📌 LÊN KÈO NHANH\n\n🆔 UID: 100057257853932\n📝 Ghi chú: Zalo Vui\n💰 Giá: 50k\n"
     )
@@ -206,6 +228,15 @@ async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
 
     w1_done = await svc.mark_status(chat_id=100, watch_id=w1.id, new_status=WatchStatus.DONE)
     assert w1_done.status == WatchStatus.DONE
+
+    w1_edited = await svc.update_watch_field(100, w1.id, "note", "Khách VIP mới")
+    assert w1_edited.note == "Khách VIP mới"
+    w1_edited = await svc.update_watch_field(100, w1.id, "price", "200k")
+    assert w1_edited.price == "200k"
+    w1_edited = await svc.update_watch_field(100, w1.id, "faq", "956")
+    assert w1_edited.faq == "956"
+    w1_edited = await svc.update_watch_field(100, w1.id, "faq", "")
+    assert w1_edited.faq == ""
 
     stats = await svc.get_stats(chat_id=100)
     assert (stats.total, stats.done, stats.live, stats.die) == (2, 1, 1, 0)

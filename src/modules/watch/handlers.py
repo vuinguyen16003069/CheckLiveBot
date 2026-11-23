@@ -27,6 +27,8 @@ from src.modules.watch.ui import (
     REPLY_SHORTCUTS,
     DashboardCallback,
     DealDraft,
+    EditWatchCallback,
+    EditWatchStates,
     ListLookupStates,
     ListPageCallback,
     QuickWatchCallback,
@@ -36,10 +38,13 @@ from src.modules.watch.ui import (
     WizardStates,
     build_dashboard_keyboard,
     build_delete_confirm_keyboard,
+    build_edit_field_keyboard,
+    build_edit_menu_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
     build_watch_keyboard,
     build_wizard_keyboard,
+    format_edit_prompt,
     format_wizard_step,
     recover_draft_from_text,
 )
@@ -408,6 +413,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def cb_watch_action(
         query: CallbackQuery,
         callback_data: WatchActionCallback,
+        state: FSMContext,
     ) -> None:
         msg = query.message
         if not isinstance(msg, Message):
@@ -422,6 +428,16 @@ def create_watch_router(watch_service: WatchService) -> Router:
                     msg,
                     format_watch_card(item),
                     build_watch_keyboard(item, back_status="ALL", back_page=1),
+                )
+                await query.answer()
+                return
+            if action == "edit":
+                await state.clear()
+                item = await watch_service.get_watch(msg.chat.id, watch_id)
+                await _safe_edit(
+                    msg,
+                    format_watch_card(item, title="✏️ Chọn mục cần sửa"),
+                    build_edit_menu_keyboard(item.id),
                 )
                 await query.answer()
                 return
@@ -472,6 +488,105 @@ def create_watch_router(watch_service: WatchService) -> Router:
 
         await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
         await query.answer(toast)
+
+    @router.callback_query(EditWatchCallback.filter())
+    async def cb_edit_watch(
+        query: CallbackQuery,
+        callback_data: EditWatchCallback,
+        state: FSMContext,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        action = callback_data.action
+        watch_id = callback_data.watch_id
+        try:
+            if action == "back":
+                await state.clear()
+                item = await watch_service.get_watch(msg.chat.id, watch_id)
+                await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
+                await query.answer()
+                return
+            if action == "menu":
+                await state.clear()
+                item = await watch_service.get_watch(msg.chat.id, watch_id)
+                await _safe_edit(
+                    msg,
+                    format_watch_card(item, title="✏️ Chọn mục cần sửa"),
+                    build_edit_menu_keyboard(item.id),
+                )
+                await query.answer()
+                return
+            if action == "field" and callback_data.field in ("note", "price", "faq"):
+                item = await watch_service.get_watch(msg.chat.id, watch_id)
+                await state.set_state(EditWatchStates.waiting_value)
+                await state.update_data(
+                    edit_watch_id=item.id,
+                    edit_field=callback_data.field,
+                    edit_message_id=msg.message_id,
+                )
+                await _safe_edit(
+                    msg,
+                    format_edit_prompt(item, callback_data.field),
+                    build_edit_field_keyboard(item.id, callback_data.field),
+                )
+                await query.answer()
+                return
+            if action == "pick" and callback_data.field in ("note", "price", "faq"):
+                item = await watch_service.update_watch_field(
+                    msg.chat.id,
+                    watch_id,
+                    callback_data.field,
+                    callback_data.value,
+                )
+                await state.clear()
+                await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
+                await query.answer("✅ Đã cập nhật kèo!")
+                return
+        except ValueError as exc:
+            await state.clear()
+            await query.answer(str(exc), show_alert=True)
+            return
+        await query.answer()
+
+    @router.message(EditWatchStates.waiting_value, F.text, ~F.text.startswith("/"))
+    async def handle_edit_watch_value(message: Message, state: FSMContext, bot: Bot) -> None:
+        data = await state.get_data()
+        watch_id = data.get("edit_watch_id")
+        raw_field = data.get("edit_field")
+        edit_message_id = data.get("edit_message_id")
+        await state.clear()
+        if not isinstance(watch_id, int) or raw_field not in ("note", "price", "faq"):
+            return
+        try:
+            item = await watch_service.update_watch_field(
+                message.chat.id,
+                watch_id,
+                raw_field,
+                (message.text or "").strip(),
+            )
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}")
+            return
+
+        text = format_watch_card(item)
+        markup = build_watch_keyboard(item)
+        if isinstance(edit_message_id, int):
+            try:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=edit_message_id,
+                    text=text,
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+                with contextlib.suppress(TelegramBadRequest):
+                    await message.delete()
+                return
+            except TelegramBadRequest:
+                pass
+        await message.answer(text, reply_markup=markup)
 
     return router
 
