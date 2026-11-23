@@ -288,7 +288,7 @@ async def test_watcher_double_verify_prevents_false_live_and_extracts_fb_name() 
 
 
 @pytest.mark.asyncio
-async def test_unified_90d_ttl_on_all_keys_and_cleanup() -> None:
+async def test_unified_90d_ttl_on_all_keys_and_lazy_prune() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     repo = RedisWatchRepository(redis, prefix="test", ttl_days=90)
     checker = _StubChecker(
@@ -306,34 +306,34 @@ async def test_unified_90d_ttl_on_all_keys_and_cleanup() -> None:
     w_done = await svc.mark_status(100, w_done.id, WatchStatus.DONE)
     await svc.set_hidden(100, w_die.id, True)
 
-    # Every single key in Redis MUST have ~90-day TTL (zero permanent no-ttl keys)
+    # Zero watches:expiry key; every single key in Redis MUST have ~90-day TTL
     all_keys = [k async for k in cast(AsyncIterator[str], redis.scan_iter("*"))]
     assert len(all_keys) > 0
+    assert "test:watches:expiry" not in all_keys
     for key in all_keys:
         ttl = await redis.ttl(key)
         assert 89 * 86400 < ttl <= 90 * 86400, f"Key {key} missing 90d TTL (ttl={ttl})"
 
-    # Backdate w_die (95d ago) and w_done (95d ago); keep w_live recent (10d ago)
-    now = datetime.now(UTC)
-    w_die.last_checked_at = now - timedelta(days=95)
-    await repo.update(w_die)
-    w_done.completed_at = now - timedelta(days=95)
-    await repo.update(w_done)
-    w_live.live_detected_at = now - timedelta(days=10)
-    await repo.update(w_live)
+    # Simulate w_die & w_done aged 95 days (Redis TTL expired their watch:* keys)
+    old_ts = (datetime.now(UTC) - timedelta(days=95)).timestamp()
+    await redis.zadd("test:watches:chat:100", {str(w_die.id): old_ts, str(w_done.id): old_ts})
+    await redis.zadd("test:watches:chat:100:status:DIE", {str(w_die.id): old_ts})
+    await redis.zadd("test:watches:chat:100:status:DONE", {str(w_done.id): old_ts})
+    await redis.delete(f"test:watch:{w_die.id}", f"test:watch:{w_done.id}")
 
-    cleaned = await repo.cleanup_expired(now=now)
-    assert cleaned == 2
-
-    # Only recent w_live remains; stats reflect the 3-month window accurately
-    assert await repo.get(w_live.id) is not None
-    assert await repo.get(w_die.id) is None
-    assert await repo.get(w_done.id) is None
-
+    # On-demand pruning via ZREMRANGEBYSCORE & lazy SREM/HDEL (no background cron!)
     stats = await svc.get_stats(100)
     assert (stats.total, stats.die, stats.live, stats.done, stats.cancelled) == (1, 0, 1, 0, 0)
 
-    # Expired UID is unlocked for re-adding
+    items, total, _ = await svc.list_watches(100)
+    assert total == 1
+    assert [it.id for it in items] == [w_live.id]
+
+    assert await repo.list_die_items() == []
+    assert cast(int, await redis.scard("test:watches:die")) == 0  # type: ignore[misc]
+
+    # Expired UID is lazily pruned from chat_uid and unlocked for re-adding
+    assert await svc.find_by_uid(100, "100001") is None
     re_added = await svc.add_watch(100, 1, "100001 | Re-added | 50k")
     assert re_added.uid == "100001"
     await redis.aclose()

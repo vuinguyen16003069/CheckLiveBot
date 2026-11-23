@@ -101,7 +101,8 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
     router = Router(name="bulk")
 
     @router.message(Command("check"))
-    async def cmd_check(message: Message, command: CommandObject) -> None:
+    async def cmd_check(message: Message, command: CommandObject, state: FSMContext) -> None:
+        await state.clear()
         raw = (command.args or "").strip()
         if not raw:
             await message.answer(
@@ -195,6 +196,9 @@ async def _reply_single_check(
 
 async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: str) -> None:
     if message.bot is None:
+        return
+    if bulk_service.is_chat_busy(message.chat.id):
+        await message.answer("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
         return
     try:
         job_id, uids, _ = bulk_service.prepare_bulk_text(text)

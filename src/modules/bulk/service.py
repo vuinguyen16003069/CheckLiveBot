@@ -40,6 +40,10 @@ class BulkCheckService:
         self._max_bulk_uids = max_bulk_uids
         self._progress_interval = max(0.5, progress_interval_seconds)
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._active_chats: set[int] = set()
+
+    def is_chat_busy(self, chat_id: int) -> bool:
+        return chat_id in self._active_chats
 
     async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
         uid = extract_uid(raw_uid)
@@ -64,6 +68,10 @@ class BulkCheckService:
         uids: Sequence[str],
         notifier: BulkNotifierPort,
     ) -> None:
+        if chat_id in self._active_chats:
+            raise ValueError("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
+        self._active_chats.add(chat_id)
+
         async def _runner() -> None:
             try:
                 await self.run_bulk_uids(
@@ -75,6 +83,8 @@ class BulkCheckService:
                 )
             except Exception as exc:
                 logger.exception("bulk_job_failed", job_id=job_id, error=str(exc))
+            finally:
+                self._active_chats.discard(chat_id)
 
         task = asyncio.create_task(_runner(), name=f"bulk:{job_id}")
         self._tasks.add(task)

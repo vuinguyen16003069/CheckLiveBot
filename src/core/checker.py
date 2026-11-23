@@ -137,7 +137,7 @@ def parse_graph_picture_payload(
 
     url_lower = url.lower()
     if data.get("is_silhouette") and any(
-        marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
+        marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g")
     ):
         return CheckOutcome.DIE, "silhouette_placeholder"
 

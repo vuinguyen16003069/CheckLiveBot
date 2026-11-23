@@ -23,6 +23,8 @@ def create_redis_client(url: str) -> Redis:
     kwargs: dict[str, Any] = {
         "decode_responses": True,
         "socket_keepalive": True,
+        "socket_connect_timeout": 5,
+        "socket_timeout": 10,
         "health_check_interval": 30,
     }
     if normalized.lower().startswith("rediss://"):

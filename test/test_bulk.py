@@ -108,8 +108,19 @@ async def test_bulk_check_service_runs_in_memory_and_sends_results() -> None:
     assert job_id
     assert total == 4
     assert skipped == 1
+    assert svc.is_chat_busy(555) is True
+
+    with pytest.raises(ValueError, match="đang có 1 phiên"):
+        svc.start_bulk_text(
+            chat_id=555,
+            text="100001\n100002\n",
+            status_message_id=78,
+            notifier=notifier,
+        )
 
     await asyncio.wait_for(notifier.done.wait(), timeout=5.0)
+    await asyncio.sleep(0)
+    assert svc.is_chat_busy(555) is False
     assert checker.called.count("100001") == 2
     assert len(notifier.progress_updates) >= 1
     assert len(notifier.results) == 1

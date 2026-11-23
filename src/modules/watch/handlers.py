@@ -94,7 +94,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
         )
 
     @router.message(Command("help"))
-    async def cmd_help(message: Message) -> None:
+    async def cmd_help(message: Message, state: FSMContext) -> None:
+        await state.clear()
         await message.answer(
             "📖 <b>Hướng dẫn sử dụng CheckLiveBot</b>\n\n"
             "<b>1. Dùng bằng 4 nút ở đáy màn hình</b>\n"
@@ -304,7 +305,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
         )
 
     @router.message(Command("stats"))
-    async def cmd_stats(message: Message) -> None:
+    async def cmd_stats(message: Message, state: FSMContext) -> None:
+        await state.clear()
         stats = await watch_service.get_stats(message.chat.id)
         await message.answer(format_watch_stats(stats))
 
@@ -423,6 +425,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
         action = callback_data.action
         watch_id = callback_data.watch_id
+        if action != "edit":
+            await state.clear()
         try:
             if action == "open":
                 item = await watch_service.get_watch(msg.chat.id, watch_id)

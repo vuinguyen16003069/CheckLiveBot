@@ -47,12 +47,18 @@ class RedisWatchRepository:
     def _k(self, suffix: str) -> str:
         return f"{self._prefix}:{suffix}"
 
-    @staticmethod
-    def _expiry_member(watch_id: int, chat_id: int, status: WatchStatus, uid: str) -> str:
-        return f"{watch_id}:{chat_id}:{status.value}:{uid}"
+    def _cutoff_ts(self, now: datetime | None = None) -> float:
+        return ((now or datetime.now(UTC)) - timedelta(days=self._ttl_days)).timestamp()
 
-    def _all_expiry_members(self, watch_id: int, chat_id: int, uid: str) -> list[str]:
-        return [self._expiry_member(watch_id, chat_id, st, uid) for st in WatchStatus]
+    def _remaining_ttl(self, created_at: datetime, now: datetime | None = None) -> int:
+        ref_now = now or datetime.now(UTC)
+        aware_created = (
+            created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=UTC)
+        )
+        return max(
+            1,
+            int((aware_created + timedelta(days=self._ttl_days) - ref_now).total_seconds()),
+        )
 
     async def create(
         self,
@@ -82,12 +88,10 @@ class RedisWatchRepository:
             live_detected_at=now if status == WatchStatus.LIVE else None,
         )
         score = now.timestamp()
-        expires_at = (now + timedelta(days=self._ttl_days)).timestamp()
         chat_key = self._k(f"watches:chat:{chat_id}")
         status_key = self._k(f"watches:chat:{chat_id}:status:{status.value}")
         uid_key = self._k(f"chat_uid:{chat_id}")
         die_key = self._k("watches:die")
-        expiry_key = self._k("watches:expiry")
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.expire(seq_key, self._ttl_seconds)
             pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=self._ttl_seconds)
@@ -100,8 +104,6 @@ class RedisWatchRepository:
             if status == WatchStatus.DIE:
                 pipe.sadd(die_key, str(watch_id))
                 pipe.expire(die_key, self._ttl_seconds)
-            pipe.zadd(expiry_key, {self._expiry_member(watch_id, chat_id, status, uid): expires_at})
-            pipe.expire(expiry_key, self._ttl_seconds)
             await pipe.execute()
         return item
 
@@ -128,17 +130,13 @@ class RedisWatchRepository:
         previous_status: WatchStatus | None = None,
     ) -> WatchItem:
         score = item.created_at.timestamp()
-        ref_time = (
-            item.completed_at or item.live_detected_at or item.last_checked_at or item.created_at
-        )
-        expires_at = (ref_time + timedelta(days=self._ttl_days)).timestamp()
+        item_ttl = self._remaining_ttl(item.created_at)
         chat_key = self._k(f"watches:chat:{item.chat_id}")
         status_key = self._k(f"watches:chat:{item.chat_id}:status:{item.status.value}")
         uid_key = self._k(f"chat_uid:{item.chat_id}")
         die_key = self._k("watches:die")
-        expiry_key = self._k("watches:expiry")
         async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=self._ttl_seconds)
+            pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=item_ttl)
             pipe.hset(uid_key, item.uid, str(item.id))
             pipe.expire(uid_key, self._ttl_seconds)
             pipe.expire(chat_key, self._ttl_seconds)
@@ -154,13 +152,6 @@ class RedisWatchRepository:
                 pipe.expire(die_key, self._ttl_seconds)
             else:
                 pipe.srem(die_key, str(item.id))
-
-            pipe.zrem(expiry_key, *self._all_expiry_members(item.id, item.chat_id, item.uid))
-            pipe.zadd(
-                expiry_key,
-                {self._expiry_member(item.id, item.chat_id, item.status, item.uid): expires_at},
-            )
-            pipe.expire(expiry_key, self._ttl_seconds)
             await pipe.execute()
         return item
 
@@ -174,27 +165,36 @@ class RedisWatchRepository:
             )
             pipe.srem(self._k("watches:die"), str(item.id))
             pipe.hdel(self._k(f"chat_uid:{item.chat_id}"), item.uid)
-            pipe.zrem(
-                self._k("watches:expiry"),
-                *self._all_expiry_members(item.id, item.chat_id, item.uid),
-            )
             await pipe.execute()
 
-    async def count_active_die(self, chat_id: int) -> int:
-        return int(await self._redis.zcard(self._k(f"watches:chat:{chat_id}:status:DIE")))
+    async def count_active_die(self, chat_id: int, *, now: datetime | None = None) -> int:
+        key = self._k(f"watches:chat:{chat_id}:status:DIE")
+        cutoff = self._cutoff_ts(now)
+        async with self._redis.pipeline(transaction=False) as pipe:
+            pipe.zremrangebyscore(key, "-inf", cutoff)
+            pipe.zcard(key)
+            _, count = await pipe.execute()
+        return int(count)
 
     async def list_die_items(self) -> list[WatchItem]:
-        ids = cast(set[str], await self._redis.smembers(self._k("watches:die")))  # type: ignore[misc]
+        die_key = self._k("watches:die")
+        ids = list(cast(set[str], await self._redis.smembers(die_key)))  # type: ignore[misc]
         if not ids:
             return []
-        keys = [self._k(f"watch:{wid}") for wid in ids]
-        raws = await self._redis.mget(keys)
+        raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in ids])
         items: list[WatchItem] = []
-        for raw in raws:
-            if raw:
-                item = WatchItem.model_validate_json(raw)
-                if item.status == WatchStatus.DIE:
-                    items.append(item)
+        stale_ids: list[str] = []
+        for wid, raw in zip(ids, raws, strict=True):
+            if not raw:
+                stale_ids.append(wid)
+                continue
+            item = WatchItem.model_validate_json(raw)
+            if item.status == WatchStatus.DIE:
+                items.append(item)
+            else:
+                stale_ids.append(wid)
+        if stale_ids:
+            await self._redis.srem(die_key, *stale_ids)  # type: ignore[misc]
         return items
 
     async def list_chat_items(
@@ -204,13 +204,19 @@ class RedisWatchRepository:
         status_filter: WatchStatus | None = None,
         page: int = 1,
         page_size: int = 10,
+        now: datetime | None = None,
     ) -> tuple[list[WatchItem], int, int]:
         key = (
             self._k(f"watches:chat:{chat_id}:status:{status_filter.value}")
             if status_filter
             else self._k(f"watches:chat:{chat_id}")
         )
-        total = int(await self._redis.zcard(key))
+        cutoff = self._cutoff_ts(now)
+        async with self._redis.pipeline(transaction=False) as pipe:
+            pipe.zremrangebyscore(key, "-inf", cutoff)
+            pipe.zcard(key)
+            _, total_raw = await pipe.execute()
+        total = int(total_raw)
         total_pages = max(1, math.ceil(total / page_size))
         safe_page = min(max(1, page), total_pages)
         start = (safe_page - 1) * page_size
@@ -222,14 +228,22 @@ class RedisWatchRepository:
         items = [WatchItem.model_validate_json(raw) for raw in raws if raw]
         return items, total, total_pages
 
-    async def get_stats(self, chat_id: int) -> WatchStats:
+    async def get_stats(self, chat_id: int, *, now: datetime | None = None) -> WatchStats:
+        cutoff = self._cutoff_ts(now)
+        keys = (
+            self._k(f"watches:chat:{chat_id}"),
+            self._k(f"watches:chat:{chat_id}:status:DIE"),
+            self._k(f"watches:chat:{chat_id}:status:LIVE"),
+            self._k(f"watches:chat:{chat_id}:status:DONE"),
+            self._k(f"watches:chat:{chat_id}:status:CANCELLED"),
+        )
         async with self._redis.pipeline(transaction=False) as pipe:
-            pipe.zcard(self._k(f"watches:chat:{chat_id}"))
-            pipe.zcard(self._k(f"watches:chat:{chat_id}:status:DIE"))
-            pipe.zcard(self._k(f"watches:chat:{chat_id}:status:LIVE"))
-            pipe.zcard(self._k(f"watches:chat:{chat_id}:status:DONE"))
-            pipe.zcard(self._k(f"watches:chat:{chat_id}:status:CANCELLED"))
-            total, die, live, done, cancelled = await pipe.execute()
+            for key in keys:
+                pipe.zremrangebyscore(key, "-inf", cutoff)
+            for key in keys:
+                pipe.zcard(key)
+            results = await pipe.execute()
+        total, die, live, done, cancelled = results[len(keys) :]
         return WatchStats(
             total=int(total),
             die=int(die),
@@ -248,34 +262,6 @@ class RedisWatchRepository:
             await self._redis.set(key, "1", ex=self._ttl_seconds)
         else:
             await self._redis.delete(key)
-
-    async def cleanup_expired(self, *, now: datetime | None = None) -> int:
-        """Prune all watch entries older than ttl_days (default 90 days / 3 months)."""
-        cutoff = (now or datetime.now(UTC)).timestamp()
-        expiry_key = self._k("watches:expiry")
-        members = await self._redis.zrangebyscore(expiry_key, "-inf", cutoff)
-        if not members:
-            return 0
-
-        cleaned = 0
-        async with self._redis.pipeline(transaction=True) as pipe:
-            for member in members:
-                parts = str(member).split(":", 3)
-                pipe.zrem(expiry_key, member)
-                if len(parts) != 4:
-                    continue
-                watch_id, chat_id, status_val, uid = parts
-                pipe.delete(self._k(f"watch:{watch_id}"))
-                pipe.zrem(self._k(f"watches:chat:{chat_id}"), watch_id)
-                pipe.zrem(self._k(f"watches:chat:{chat_id}:status:{status_val}"), watch_id)
-                pipe.srem(self._k("watches:die"), watch_id)
-                pipe.hdel(self._k(f"chat_uid:{chat_id}"), uid)
-                cleaned += 1
-            await pipe.execute()
-
-        if cleaned > 0:
-            logger.info("watch_ttl_cleanup_completed", cleaned=cleaned, ttl_days=self._ttl_days)
-        return cleaned
 
 
 class WatchService:
@@ -392,8 +378,6 @@ class WatchService:
                     item.live_detected_at = now
                     await self._repo.update(item, previous_status=WatchStatus.DIE)
                     turned_live.append(item)
-                elif res.outcome == CheckOutcome.DIE:
-                    await self._repo.update(item)
 
         await asyncio.gather(*(_check_item(i) for i in items))
         if turned_live:

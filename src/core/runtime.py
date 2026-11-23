@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
-import time
 from typing import Any
 
 import structlog
@@ -37,24 +36,13 @@ async def run_watcher_loop(
     scanner: WatcherScanService,
     interval_seconds: int,
     stop_event: asyncio.Event,
-    *,
-    repo: RedisWatchRepository | None = None,
-    cleanup_interval_seconds: int = 21600,
 ) -> None:
-    """Dedicated low-latency watcher loop polling DIE watches + 60-day LIVE auto-archive."""
+    """Dedicated low-latency watcher loop polling DIE watches."""
     delay = max(3, interval_seconds)
-    cleanup_every = max(60, cleanup_interval_seconds)
-    last_cleanup = 0.0
     logger.info("watcher_loop_started", interval_seconds=delay)
     while not stop_event.is_set():
         try:
             await scanner.scan_once()
-            now_mono = time.monotonic()
-            if repo is not None and (
-                last_cleanup == 0.0 or (now_mono - last_cleanup) >= cleanup_every
-            ):
-                await repo.cleanup_expired()
-                last_cleanup = now_mono
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -69,7 +57,7 @@ async def run_bot(settings: Settings) -> None:
         raise RuntimeError("BOT_TOKEN is required. Copy .env.example to .env and set BOT_TOKEN.")
 
     redis = create_redis_client(settings.redis_url)
-    await redis.ping()
+    await asyncio.wait_for(redis.ping(), timeout=10.0)
     logger.info("redis_connected")
 
     checker = CurlCffiFacebookChecker(
@@ -134,8 +122,6 @@ async def run_bot(settings: Settings) -> None:
             scanner,
             settings.poll_interval_seconds,
             watcher_stop,
-            repo=repo,
-            cleanup_interval_seconds=settings.cleanup_interval_seconds,
         ),
         name="watcher-loop",
     )

@@ -70,6 +70,20 @@ def test_parse_graph_picture_payload() -> None:
     assert outcome == CheckOutcome.DIE
     assert detail == "silhouette_placeholder"
 
+    # Mixed-case silhouette hash marker must also match case-insensitively
+    hash_placeholder = {
+        "data": {
+            "height": 50,
+            "width": 50,
+            "is_silhouette": True,
+            "url": "https://scontent.xx.fbcdn.net/v/t1.30497-1/C5yt7C_3z_G.jpg",
+        }
+    }
+    assert parse_graph_picture_payload(hash_placeholder) == (
+        CheckOutcome.DIE,
+        "silhouette_placeholder",
+    )
+
 
 async def test_checker_live_die_and_retry_with_proxy_rotation() -> None:
     pool = ProxyPool(["http://p1:8080", "http://p2:8080"])
