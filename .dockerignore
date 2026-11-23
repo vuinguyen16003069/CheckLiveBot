@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Virtual Environments
+.venv
+venv
+
+# Python Bytecode & Caches
+**/__pycache__
+**/*.py[cod]
+*.so
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+coverage.xml
+
+# Environment Variables, Secrets & Local Dumps
+.env
+.env.*
+*.log
+*.db
+*.sqlite3
+redis_*.json
+
+# Tests, Scripts, Docs & Deploy Meta (not needed in image)
+test/
+scripts/
+README.md
+LICENSE
+AGENTS.md
+Procfile
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

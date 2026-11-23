@@ -381,24 +381,52 @@ async def main() -> None:
 
 
 @pytest.mark.asyncio
-async def test_redis_manager_helpers_offline() -> None:
+async def test_redis_manager_helpers_offline(tmp_path: Path) -> None:
     r = fakeredis.aioredis.FakeRedis(decode_responses=True)
     await r.set(
         "checklivebot:watch:1",
         json.dumps({"id": 1, "uid": "100099", "status": "DIE"}),
+        ex=3600,
     )
-    await r.set("checklivebot:check_cache:20531316728", "LIVE", ex=600)
+    await r.set("checklivebot:raw:long", "x" * 250)
+    await r.hset("checklivebot:chat_uid:100", "100099", "1")  # type: ignore[misc]
+    await r.rpush("checklivebot:list:1", "a", "b")  # type: ignore[misc]
+    await r.sadd("checklivebot:watches:die", "2", "1")  # type: ignore[misc]
+    await r.zadd("checklivebot:watches:chat:100", {"1": 1234.5})
 
     keys = await get_all_keys(r)
-    assert len(keys) == 2
+    assert len(keys) == 6
 
     groups = build_key_groups(keys, prefix="checklivebot")
     assert "checklivebot:watch" in groups
-    assert "checklivebot:check_cache" in groups
+    assert "checklivebot:chat_uid" in groups
+    assert "checklivebot:watches" in groups
 
-    dump = await fetch_dump_dict(r)
+    # Truncated vs full string snapshot + all Redis data types
+    short_snap = await get_key_snapshot(r, "checklivebot:raw:long", full=False)
+    assert short_snap["value"].endswith("... (truncated)")
+    full_snap = await get_key_snapshot(r, "checklivebot:raw:long", full=True)
+    assert full_snap["value"] == "x" * 250
+
+    dump = await fetch_dump_dict(r, full=True)
     assert dump["checklivebot:watch:1"]["type"] == "string"
     assert dump["checklivebot:watch:1"]["value"]["uid"] == "100099"
+    assert dump["checklivebot:chat_uid:100"]["value"] == {"100099": "1"}
+    assert dump["checklivebot:list:1"]["value"] == ["a", "b"]
+    assert dump["checklivebot:watches:die"]["value"] == ["1", "2"]
+    assert dump["checklivebot:watches:chat:100"]["value"] == [("1", 1234.5)]
+
+    out_file = await asyncio.to_thread(save_dump_file, str(tmp_path / "backup.json"), dump)
+    saved_text = await asyncio.to_thread(Path(out_file).read_text, "utf-8")
+    assert json.loads(saved_text)["checklivebot:watch:1"]["value"]["uid"] == "100099"
+
+    await delete_key_by_name(r, "checklivebot:raw:long")
+    assert await r.exists("checklivebot:raw:long") == 0
+    await delete_group_keys(r, "checklivebot:watches")
+    assert await get_all_keys(r, "checklivebot:watches:*") == []
+
+    await flush_all_database(r)
+    assert await get_all_keys(r) == []
     await r.aclose()
 
 

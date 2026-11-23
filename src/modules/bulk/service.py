@@ -89,6 +89,7 @@ class BulkCheckService:
         task = asyncio.create_task(_runner(), name=f"bulk:{job_id}")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda _t: self._active_chats.discard(chat_id))
         logger.info("bulk_job_started", job_id=job_id, chat_id=chat_id, total=len(uids))
 
     def start_bulk_text(
@@ -214,3 +215,4 @@ class BulkCheckService:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._active_chats.clear()

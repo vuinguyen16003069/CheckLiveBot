@@ -3,6 +3,7 @@ name = "checklivebot"
 version = "1.0.0"
 description = "Telegram Bot check LIVE/DIE Facebook UID (Single-Process Asyncio, Redis RAM, curl_cffi)"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "aiogram>=3.13,<4.0",
