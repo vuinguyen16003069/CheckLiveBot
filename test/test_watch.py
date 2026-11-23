@@ -193,6 +193,14 @@ async def test_watch_service_lifecycle_pagination_and_isolation() -> None:
 
     w1_hidden = await svc.set_hidden(chat_id=100, watch_id=w1.id, hidden=True)
     assert w1_hidden.is_hidden is True
+    ttl_pref = await redis.ttl("test:pref:hidden:100")
+    assert 29 * 86400 < ttl_pref <= 30 * 86400
+    # Global per-chat hide preference applies to all other watches in chat 100
+    w2_loaded = await svc.get_watch(chat_id=100, watch_id=w2.id)
+    assert w2_loaded.is_hidden is True
+    w1_visible = await svc.set_hidden(chat_id=100, watch_id=w1.id, hidden=False)
+    assert w1_visible.is_hidden is False
+    assert await redis.exists("test:pref:hidden:100") == 0
 
     w1_done = await svc.mark_status(chat_id=100, watch_id=w1.id, new_status=WatchStatus.DONE)
     assert w1_done.status == WatchStatus.DONE

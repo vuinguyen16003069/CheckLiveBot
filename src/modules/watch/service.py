@@ -236,6 +236,17 @@ class RedisWatchRepository:
             cancelled=int(cancelled),
         )
 
+    async def get_chat_hidden(self, chat_id: int) -> bool:
+        raw = await self._redis.get(self._k(f"pref:hidden:{chat_id}"))
+        return raw == "1"
+
+    async def set_chat_hidden(self, chat_id: int, hidden: bool, ttl_days: int = 30) -> None:
+        key = self._k(f"pref:hidden:{chat_id}")
+        if hidden:
+            await self._redis.set(key, "1", ex=max(1, ttl_days) * 86400)
+        else:
+            await self._redis.delete(key)
+
     async def cleanup_expired(self, *, now: datetime | None = None) -> int:
         """Auto-archive untouched LIVE watches older than 60 days into DONE stats and prune."""
         if self._live_retention_days <= 0:
@@ -285,7 +296,10 @@ class WatchService:
         self._concurrency = max(1, concurrency)
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
-        return await self._repo.find_by_uid(chat_id, uid)
+        item = await self._repo.find_by_uid(chat_id, uid)
+        if item is not None:
+            item.is_hidden = await self._repo.get_chat_hidden(chat_id)
+        return item
 
     async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
         parsed = parse_add_line(raw_args)
@@ -296,12 +310,14 @@ class WatchService:
             return 0
 
         # Run Redis pre-checks and live Facebook check concurrently to cut latency
-        existing, active_count, res = await asyncio.gather(
+        existing, active_count, is_hidden, res = await asyncio.gather(
             self._repo.find_by_uid(chat_id, parsed.uid),
             _count_die(),
+            self._repo.get_chat_hidden(chat_id),
             self._checker.check(parsed.uid),
         )
         if existing is not None:
+            existing.is_hidden = is_hidden
             raise DuplicateWatchError(existing)
 
         if self._max_active_per_chat > 0 and active_count >= self._max_active_per_chat:
@@ -310,7 +326,7 @@ class WatchService:
             )
 
         initial_status = WatchStatus.LIVE if res.outcome == CheckOutcome.LIVE else WatchStatus.DIE
-        return await self._repo.create(
+        item = await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
             uid=parsed.uid,
@@ -319,6 +335,8 @@ class WatchService:
             faq=parsed.faq,
             status=initial_status,
         )
+        item.is_hidden = is_hidden
+        return item
 
     async def get_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         return await self._require_owned(chat_id, watch_id)
@@ -381,18 +399,24 @@ class WatchService:
                     await self._repo.update(item)
 
         await asyncio.gather(*(_check_item(i) for i in items))
+        if turned_live:
+            is_hidden = await self._repo.get_chat_hidden(chat_id)
+            for item in turned_live:
+                item.is_hidden = is_hidden
         return len(items), turned_live
 
     async def _require_owned(self, chat_id: int, watch_id: int) -> WatchItem:
         item = await self._repo.get(watch_id)
         if item is None or item.chat_id != chat_id:
             raise ValueError("Không tìm thấy kèo trong chat này.")
+        item.is_hidden = await self._repo.get_chat_hidden(chat_id)
         return item
 
     async def set_hidden(self, chat_id: int, watch_id: int, hidden: bool) -> WatchItem:
+        await self._repo.set_chat_hidden(chat_id, hidden, ttl_days=30)
         item = await self._require_owned(chat_id, watch_id)
         item.is_hidden = hidden
-        return await self._repo.update(item)
+        return item
 
     async def mark_status(
         self,
@@ -485,6 +509,7 @@ class WatcherScanService:
                     item.status = WatchStatus.LIVE
                     item.live_detected_at = now
                     await self._repo.update(item, previous_status=WatchStatus.DIE)
+                    item.is_hidden = await self._repo.get_chat_hidden(item.chat_id)
                     await self._notifier.notify_live(item)
                     count += 1
                 return count
