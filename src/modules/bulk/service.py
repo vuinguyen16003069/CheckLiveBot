@@ -49,20 +49,21 @@ class BulkCheckService:
         result = await self._checker.check(uid)
         return uid, result.outcome
 
-    def start_bulk_text(
-        self,
-        *,
-        chat_id: int,
-        text: str,
-        status_message_id: int,
-        notifier: BulkNotifierPort,
-    ) -> tuple[str, int, int]:
+    def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int]:
         uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
         if not uids:
             raise ValueError("Không tìm thấy UID hợp lệ nào trong nội dung gửi lên.")
+        return uuid.uuid4().hex[:8], uids, skipped
 
-        job_id = uuid.uuid4().hex[:8]
-
+    def start_bulk_uids(
+        self,
+        *,
+        job_id: str,
+        chat_id: int,
+        status_message_id: int,
+        uids: Sequence[str],
+        notifier: BulkNotifierPort,
+    ) -> None:
         async def _runner() -> None:
             try:
                 await self.run_bulk_uids(
@@ -79,6 +80,23 @@ class BulkCheckService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         logger.info("bulk_job_started", job_id=job_id, chat_id=chat_id, total=len(uids))
+
+    def start_bulk_text(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        status_message_id: int,
+        notifier: BulkNotifierPort,
+    ) -> tuple[str, int, int]:
+        job_id, uids, skipped = self.prepare_bulk_text(text)
+        self.start_bulk_uids(
+            job_id=job_id,
+            chat_id=chat_id,
+            status_message_id=status_message_id,
+            uids=uids,
+            notifier=notifier,
+        )
         return job_id, len(uids), skipped
 
     async def run_bulk_uids(

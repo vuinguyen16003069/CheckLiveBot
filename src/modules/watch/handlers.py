@@ -103,7 +103,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
 
         stats = await watch_service.get_stats(message.chat.id)
-        tmp = await message.answer("⚡", reply_markup=build_reply_keyboard())
+        tmp = await message.answer("...", reply_markup=build_reply_keyboard())
         with contextlib.suppress(TelegramBadRequest):
             await tmp.delete()
         await message.answer(

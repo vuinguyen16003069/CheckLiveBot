@@ -193,21 +193,22 @@ async def _reply_single_check(
 async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: str) -> None:
     if message.bot is None:
         return
-    status_msg = await message.answer("⏳ Đang tiếp nhận danh sách UID...")
     try:
-        job_id, total, skipped = bulk_service.start_bulk_text(
-            chat_id=message.chat.id,
-            text=text,
-            status_message_id=status_msg.message_id,
-            notifier=TelegramBulkNotifier(message.bot),
-        )
+        job_id, uids, skipped = bulk_service.prepare_bulk_text(text)
     except ValueError as exc:
-        await status_msg.edit_text(f"❌ {exc}")
+        await message.answer(f"❌ {exc}")
         return
 
     extra = f" (đã lọc bỏ {skipped:,} dòng trùng/lỗi)" if skipped else ""
-    await status_msg.edit_text(
-        f"📥 <b>Đã nhận {total:,} UID</b>{extra}\n"
+    status_msg = await message.answer(
+        f"📥 <b>Đã nhận {len(uids):,} UID</b>{extra}\n"
         f"🆔 Mã phiên: <code>#{job_id}</code>\n"
         "⚙️ Bot đang kiểm tra ngay và sẽ cập nhật tiến độ liên tục..."
+    )
+    bulk_service.start_bulk_uids(
+        job_id=job_id,
+        chat_id=message.chat.id,
+        status_message_id=status_msg.message_id,
+        uids=uids,
+        notifier=TelegramBulkNotifier(message.bot),
     )
