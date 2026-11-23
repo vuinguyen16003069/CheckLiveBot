@@ -165,7 +165,9 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             return
         if "\n" in text:
             uids, _ = extract_uids_from_text(text, max_uids=50000)
-            if len(uids) >= 2:
+            if len(uids) == 1:
+                await _reply_single_check(message, bulk_service, uids[0])
+            elif len(uids) >= 2:
                 await _start_bulk(message, bulk_service, text)
 
     return router
