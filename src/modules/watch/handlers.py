@@ -44,21 +44,6 @@ from src.modules.watch.ui import (
     recover_draft_from_text,
 )
 
-HELP_TEXT = (
-    "📖 <b>Hướng dẫn sử dụng CheckLiveBot</b>\n\n"
-    "<b>1. Dùng bằng 4 nút ở đáy màn hình</b>\n"
-    "• <b>➕ Lên kèo</b> — Nhập tuần tự <code>UID → Ghi chú → Giá → FAQ</code>\n"
-    "• <b>📋 Danh sách</b> — Xem kèo (chạm thẳng vào UID để mở chi tiết)\n"
-    "• <b>🔎 Check nhanh</b> — Check 1 UID, link Facebook, nhiều dòng UID hoặc file <code>.txt</code>\n"
-    "• <b>📊 Thống kê</b> — Xem số lượng kèo theo trạng thái\n\n"
-    "<b>2. Dán thẳng vào chat (không cần gõ lệnh)</b>\n"
-    "• Dán 1 UID / link FB → Check ngay\n"
-    "• Dán nhiều dòng UID hoặc gửi file <code>.txt</code> → Check hàng loạt (trả 1 file kết quả)\n\n"
-    "<b>3. Lệnh nhanh</b>\n"
-    "• <code>/add UID | ghi chú | giá | FAQ</code>\n"
-    "• <code>/check &lt;UID / link FB&gt;</code> | <code>/list</code> | <code>/stats</code>"
-)
-
 
 class TelegramWatchNotifier:
     def __init__(self, bot: Bot) -> None:
@@ -110,7 +95,21 @@ def create_watch_router(watch_service: WatchService) -> Router:
 
     @router.message(Command("help"))
     async def cmd_help(message: Message) -> None:
-        await message.answer(HELP_TEXT, reply_markup=build_reply_keyboard())
+        await message.answer(
+            "📖 <b>Hướng dẫn sử dụng CheckLiveBot</b>\n\n"
+            "<b>1. Dùng bằng 4 nút ở đáy màn hình</b>\n"
+            "• <b>➕ Lên kèo</b> — Nhập tuần tự <code>UID → Ghi chú → Giá → FAQ</code>\n"
+            "• <b>📋 Danh sách</b> — Xem kèo (chạm thẳng vào UID để mở chi tiết)\n"
+            "• <b>🔎 Check nhanh</b> — Check 1 UID, link Facebook, nhiều dòng UID hoặc file <code>.txt</code>\n"
+            "• <b>📊 Thống kê</b> — Xem số lượng kèo theo trạng thái\n\n"
+            "<b>2. Dán thẳng vào chat (không cần gõ lệnh)</b>\n"
+            "• Dán 1 UID / link FB → Check ngay\n"
+            "• Dán nhiều dòng UID hoặc gửi file <code>.txt</code> → Check hàng loạt (trả 1 file kết quả)\n\n"
+            "<b>3. Lệnh nhanh</b>\n"
+            "• <code>/add UID | ghi chú | giá | FAQ</code>\n"
+            "• <code>/check &lt;UID / link FB&gt;</code> | <code>/list</code> | <code>/stats</code>",
+            reply_markup=build_reply_keyboard(),
+        )
 
     @router.message(Command("cancel"))
     async def cmd_cancel(message: Message, state: FSMContext) -> None:
@@ -141,7 +140,22 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if not raw:
             await _start_wizard(message, state, DealDraft(), step=1)
             return
-        await _handle_add_watch(message, watch_service, raw)
+        user_id = message.from_user.id if message.from_user else 0
+        try:
+            item = await watch_service.add_watch(message.chat.id, user_id, raw)
+        except DuplicateWatchError as exc:
+            await message.answer(
+                f"⚠️ {exc}\nBấm nút dưới để mở kèo cũ:",
+                reply_markup=_duplicate_watch_keyboard(exc.existing.id, in_wizard=False),
+            )
+            return
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}")
+            return
+        await message.answer(
+            format_watch_card(item, title="✅ Đã thêm UID thành công!"),
+            reply_markup=build_watch_keyboard(item),
+        )
 
     @router.message(WizardStates.waiting_uid, F.text)
     async def wizard_step_uid(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -150,7 +164,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         uid = extract_uid((message.text or "").strip())
         if not uid:
             await message.answer(
-                "❌ UID chưa đúng (cần 5–20 chữ số, VD: <code>100045216769361</code> "
+                "❌ UID chưa đúng (cần 1–20 chữ số, VD: <code>100045216769361</code> "
                 "hoặc link Facebook cá nhân).\n👉 Gửi lại <b>UID</b>:",
                 reply_markup=build_wizard_keyboard(step=1),
             )
@@ -267,7 +281,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
         uid = extract_uid(raw)
         if not uid:
             await message.answer(
-                "❌ UID chưa đúng (cần 5–20 chữ số hoặc link Facebook cá nhân).\n"
+                "❌ UID chưa đúng (cần 1–20 chữ số hoặc link Facebook cá nhân).\n"
                 "👉 Nhắn lại <b>UID / link</b> để tra cứu kèo."
             )
             return
@@ -603,25 +617,6 @@ async def _finalize_wizard(
             pass
 
     await message.answer(text, reply_markup=markup)
-
-
-async def _handle_add_watch(message: Message, watch_service: WatchService, raw: str) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    try:
-        item = await watch_service.add_watch(message.chat.id, user_id, raw)
-    except DuplicateWatchError as exc:
-        await message.answer(
-            f"⚠️ {exc}\nBấm nút dưới để mở kèo cũ:",
-            reply_markup=_duplicate_watch_keyboard(exc.existing.id, in_wizard=False),
-        )
-        return
-    except ValueError as exc:
-        await message.answer(f"❌ {exc}")
-        return
-    await message.answer(
-        format_watch_card(item, title="✅ Đã thêm UID thành công!"),
-        reply_markup=build_watch_keyboard(item),
-    )
 
 
 def _duplicate_watch_keyboard(watch_id: int, *, in_wizard: bool) -> InlineKeyboardMarkup:

@@ -8,10 +8,6 @@ from pydantic import BaseModel
 
 from src.core.ports import CheckOutcome
 
-_UID_RE = re.compile(r"^\d{5,20}$")
-_FB_PROFILE_ID_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)(\d{5,20})", re.IGNORECASE)
-_ANY_UID_TOKEN_RE = re.compile(r"\b(\d{5,20})\b")
-
 
 class BulkSummary(BaseModel):
     job_id: str
@@ -26,10 +22,9 @@ def extract_uid(raw: str) -> str | None:
     text = raw.strip()
     if not text:
         return None
-    if _UID_RE.match(text):
+    if re.fullmatch(r"[1-9]\d{0,19}", text):
         return text
-    match = _FB_PROFILE_ID_RE.search(text)
-    if match:
+    if match := re.search(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", text, re.IGNORECASE):
         return match.group(1)
     return None
 
@@ -45,7 +40,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = _ANY_UID_TOKEN_RE.search(stripped)
+            token_match = re.search(r"\b(\d{5,20})\b", stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1

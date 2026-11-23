@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 
 from src.modules.bulk.domain import extract_uid
 
-_VN_TZ = timezone(timedelta(hours=7))
-
 
 class WatchStatus(StrEnum):
     DIE = "DIE"
@@ -61,7 +59,7 @@ def parse_add_line(raw: str) -> ParsedWatchInput:
     parts = [part.strip() for part in text.split("|")]
     uid = extract_uid(parts[0])
     if not uid:
-        raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link Facebook cá nhân).")
+        raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
 
     note = parts[1] if len(parts) >= 2 and parts[1] else "Không có ghi chú"
     price = parts[2] if len(parts) >= 3 and parts[2] else "0"
@@ -86,11 +84,6 @@ def format_duration(start: datetime, end: datetime) -> str:
     return " ".join(chunks)
 
 
-def _format_vn_time(dt: datetime) -> str:
-    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
-    return aware.astimezone(_VN_TZ).strftime("%H:%M:%S %d/%m/%Y")
-
-
 def _format_price(raw_price: str) -> str:
     cleaned = raw_price.strip()
     if not cleaned:
@@ -99,15 +92,6 @@ def _format_price(raw_price: str) -> str:
         num = int(cleaned)
         return f"{num:,}đ".replace(",", ".") if num >= 1000 else f"{num}đ"
     return cleaned
-
-
-def _progress_label(status: WatchStatus) -> str:
-    return {
-        WatchStatus.DIE: "🔴 Đang theo dõi chờ LIVE ✅",
-        WatchStatus.LIVE: "✅ Đã LIVE lại / Hoàn tất ✅",
-        WatchStatus.DONE: "✅ Đã Done kèo ✅",
-        WatchStatus.CANCELLED: "❌ Đã Hủy kèo",
-    }[status]
 
 
 def _spoiler(html_text: str, hidden: bool) -> str:
@@ -153,9 +137,20 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         )
         lines.append(f"⚠️ <b>FAQ:</b> {_spoiler(faq_raw, item.is_hidden)}")
 
-    lines.append(f"🔄 <b>Tiến trình:</b> {_progress_label(item.status)}")
+    progress_label = {
+        WatchStatus.DIE: "🔴 Đang theo dõi chờ LIVE ✅",
+        WatchStatus.LIVE: "✅ Đã LIVE lại / Hoàn tất ✅",
+        WatchStatus.DONE: "✅ Đã Done kèo ✅",
+        WatchStatus.CANCELLED: "❌ Đã Hủy kèo",
+    }[item.status]
+    lines.append(f"🔄 <b>Tiến trình:</b> {progress_label}")
+
     display_time = item.live_detected_at or item.last_checked_at or item.created_at
-    lines.append(f"🕒 <b>Thời gian:</b> {_spoiler(_format_vn_time(display_time), item.is_hidden)}")
+    aware_time = (
+        display_time if display_time.tzinfo is not None else display_time.replace(tzinfo=UTC)
+    )
+    vn_time = aware_time.astimezone(timezone(timedelta(hours=7))).strftime("%H:%M:%S %d/%m/%Y")
+    lines.append(f"🕒 <b>Thời gian:</b> {_spoiler(vn_time, item.is_hidden)}")
 
     if item.live_detected_at:
         elapsed = format_duration(item.created_at, item.live_detected_at)

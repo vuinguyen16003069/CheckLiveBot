@@ -24,15 +24,6 @@ from src.modules.watch.service import RedisWatchRepository, WatcherScanService, 
 
 logger = structlog.get_logger(__name__)
 
-BOT_COMMANDS: list[BotCommand] = [
-    BotCommand(command="start", description="Mở bảng điều khiển & bàn phím nhanh"),
-    BotCommand(command="check", description="Kiểm tra nhanh 1 UID hoặc link FB"),
-    BotCommand(command="add", description="Lên kèo theo dõi DIE → LIVE"),
-    BotCommand(command="list", description="Danh sách kèo (chạm UID xem chi tiết)"),
-    BotCommand(command="stats", description="Thống kê số lượng kèo"),
-    BotCommand(command="help", description="Hướng dẫn sử dụng"),
-]
-
 
 def install_uvloop_if_available() -> None:
     if sys.platform != "win32":
@@ -40,23 +31,6 @@ def install_uvloop_if_available() -> None:
             import uvloop  # type: ignore[import-not-found]
 
             uvloop.install()
-
-
-def build_dispatcher(
-    *,
-    settings: Settings,
-    watch_service: WatchService,
-    bulk_service: BulkCheckService,
-) -> Dispatcher:
-    dp = Dispatcher(storage=MemoryStorage())
-
-    throttle = ThrottlingMiddleware(limit_per_minute=settings.user_rate_limit_per_minute)
-    dp.message.middleware(throttle)
-    dp.callback_query.middleware(throttle)
-
-    dp.include_router(create_watch_router(watch_service))
-    dp.include_router(create_bulk_router(bulk_service))
-    return dp
 
 
 async def run_watcher_loop(
@@ -135,14 +109,24 @@ async def run_bot(settings: Settings) -> None:
         concurrency=settings.concurrency,
     )
 
-    dp = build_dispatcher(
-        settings=settings,
-        watch_service=watch_service,
-        bulk_service=bulk_service,
-    )
+    dp = Dispatcher(storage=MemoryStorage())
+    throttle = ThrottlingMiddleware(limit_per_minute=settings.user_rate_limit_per_minute)
+    dp.message.middleware(throttle)
+    dp.callback_query.middleware(throttle)
+    dp.include_router(create_watch_router(watch_service))
+    dp.include_router(create_bulk_router(bulk_service))
 
     with contextlib.suppress(Exception):
-        await bot.set_my_commands(BOT_COMMANDS)
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Mở bảng điều khiển & bàn phím nhanh"),
+                BotCommand(command="check", description="Kiểm tra nhanh 1 UID hoặc link FB"),
+                BotCommand(command="add", description="Lên kèo theo dõi DIE → LIVE"),
+                BotCommand(command="list", description="Danh sách kèo (chạm UID xem chi tiết)"),
+                BotCommand(command="stats", description="Thống kê số lượng kèo"),
+                BotCommand(command="help", description="Hướng dẫn sử dụng"),
+            ]
+        )
 
     watcher_stop = asyncio.Event()
     watcher_task: asyncio.Task[Any] = asyncio.create_task(

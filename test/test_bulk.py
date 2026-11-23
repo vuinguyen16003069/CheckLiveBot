@@ -55,6 +55,9 @@ class _StubBulkNotifier:
 
 
 def test_extract_uids_deduplicates_large_input_and_progress_bar() -> None:
+    assert extract_uid("4") == "4"
+    assert extract_uid("https://www.facebook.com/profile.php?id=4") == "4"
+    assert extract_uid("0") is None
     assert extract_uid("100012345678901") == "100012345678901"
     assert (
         extract_uid("https://www.facebook.com/profile.php?id=100012345678901") == "100012345678901"

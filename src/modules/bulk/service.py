@@ -44,7 +44,7 @@ class BulkCheckService:
     async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
         uid = extract_uid(raw_uid)
         if not uid:
-            raise ValueError("UID không hợp lệ (cần 5–20 chữ số hoặc link Facebook cá nhân).")
+            raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
 
         result = await self._checker.check(uid)
         return uid, result.outcome

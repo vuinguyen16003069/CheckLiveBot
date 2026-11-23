@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from itertools import cycle
 from typing import Any, cast
 
@@ -70,12 +69,12 @@ class CurlCffiFacebookChecker:
                     await asyncio.sleep(min(0.2 * 2**attempt, 1.0))
             except Exception as exc:
                 logger.warning("fb_check_unexpected_error", uid=uid, error=str(exc))
-                return self._result(uid, CheckOutcome.ERROR, str(exc))
+                return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(exc))
             else:
-                return self._result(uid, outcome, detail)
+                return UidCheckResult(uid=uid, outcome=outcome, detail=detail)
 
         logger.warning("fb_check_retry_exhausted", uid=uid, error=str(last_error))
-        return self._result(uid, CheckOutcome.ERROR, str(last_error))
+        return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(last_error))
 
     async def verify_live(self, uid: str) -> UidCheckResult:
         await asyncio.sleep(self._verify_delay)
@@ -108,27 +107,6 @@ class CurlCffiFacebookChecker:
 
         return parse_graph_picture_payload(payload, status)
 
-    @staticmethod
-    def _result(uid: str, outcome: CheckOutcome, detail: str | None) -> UidCheckResult:
-        return UidCheckResult(
-            uid=uid,
-            outcome=outcome,
-            checked_at=datetime.now(UTC),
-            detail=detail,
-        )
-
-
-def _has_valid_avatar(data: dict[str, Any]) -> bool:
-    height, width, url = data.get("height"), data.get("width"), data.get("url")
-    return (
-        isinstance(height, int)
-        and isinstance(width, int)
-        and height > 0
-        and width > 0
-        and isinstance(url, str)
-        and bool(url.strip())
-    )
-
 
 def parse_graph_picture_payload(
     payload: Any,
@@ -146,10 +124,18 @@ def parse_graph_picture_payload(
         return CheckOutcome.DIE, f"no_data_http_{status_code}"
 
     data = cast(dict[str, Any], data_raw)
-    if not _has_valid_avatar(data):
+    height, width, url = data.get("height"), data.get("width"), data.get("url")
+    if not (
+        isinstance(height, int)
+        and isinstance(width, int)
+        and height > 0
+        and width > 0
+        and isinstance(url, str)
+        and bool(url.strip())
+    ):
         return CheckOutcome.DIE, "missing_avatar_dimensions"
 
-    url_lower = str(data["url"]).lower()
+    url_lower = url.lower()
     if data.get("is_silhouette") and any(
         marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "C5yt7C_3z_G")
     ):

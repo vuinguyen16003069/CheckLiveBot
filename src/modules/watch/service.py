@@ -435,23 +435,6 @@ class WatchService:
             item.completed_at = None
         return await self._repo.update(item, previous_status=prev)
 
-    async def recheck_one(self, chat_id: int, watch_id: int) -> tuple[WatchItem, CheckOutcome]:
-        item = await self._require_owned(chat_id, watch_id)
-        res = await self._checker.check(item.uid)
-        now = datetime.now(UTC)
-        item.last_checked_at = now
-        prev = item.status
-        if res.outcome == CheckOutcome.LIVE and item.status == WatchStatus.DIE:
-            verified = await self._checker.verify_live(item.uid)
-            if verified.outcome != CheckOutcome.LIVE:
-                return item, verified.outcome
-            item.status = WatchStatus.LIVE
-            item.live_detected_at = now
-            await self._repo.update(item, previous_status=prev)
-            return item, CheckOutcome.LIVE
-        await self._repo.update(item)
-        return item, res.outcome
-
 
 class WatcherScanService:
     def __init__(

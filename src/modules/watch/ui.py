@@ -180,17 +180,12 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
     return f"{header}\n{body}\n👉 {prompts[step]}"
 
 
-_WIZARD_UID_RE = re.compile(r"UID:\s*([A-Za-z0-9._-]{5,50})")
-_WIZARD_NOTE_RE = re.compile(r"Ghi chú:\s*(.+)")
-_WIZARD_PRICE_RE = re.compile(r"Giá:\s*(.+)")
-
-
 def recover_draft_from_text(text: str | None) -> DealDraft:
     if not text:
         return DealDraft()
-    uid_m = _WIZARD_UID_RE.search(text)
-    note_m = _WIZARD_NOTE_RE.search(text)
-    price_m = _WIZARD_PRICE_RE.search(text)
+    uid_m = re.search(r"UID:\s*([A-Za-z0-9._-]{1,50})", text)
+    note_m = re.search(r"Ghi chú:\s*(.+)", text)
+    price_m = re.search(r"Giá:\s*(.+)", text)
     return DealDraft(
         uid=uid_m.group(1).strip() if uid_m else "",
         note=note_m.group(1).strip() if note_m else "",
