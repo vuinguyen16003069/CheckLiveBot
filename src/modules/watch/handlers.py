@@ -27,8 +27,6 @@ from src.modules.watch.ui import (
     REPLY_SHORTCUTS,
     DashboardCallback,
     DealDraft,
-    EditWatchCallback,
-    EditWatchStates,
     ListLookupStates,
     ListPageCallback,
     QuickWatchCallback,
@@ -38,13 +36,10 @@ from src.modules.watch.ui import (
     WizardStates,
     build_dashboard_keyboard,
     build_delete_confirm_keyboard,
-    build_edit_field_keyboard,
-    build_edit_menu_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
     build_watch_keyboard,
     build_wizard_keyboard,
-    format_edit_prompt,
     format_wizard_step,
     recover_draft_from_text,
 )
@@ -230,6 +225,14 @@ def create_watch_router(watch_service: WatchService) -> Router:
 
         if action == "cancel":
             await state.clear()
+            if draft.edit_watch_id is not None:
+                try:
+                    item = await watch_service.get_watch(msg.chat.id, draft.edit_watch_id)
+                    await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
+                except ValueError:
+                    await _safe_edit(msg, "🛑 Đã hủy sửa kèo.", None)
+                await query.answer("🛑 Đã hủy sửa kèo.")
+                return
             await _safe_edit(msg, "🛑 Đã hủy lên kèo.", None)
             await query.answer("🛑 Đã hủy lên kèo.")
             return
@@ -264,14 +267,13 @@ def create_watch_router(watch_service: WatchService) -> Router:
         if action in ("pick_faq", "skip_faq"):
             if not draft.uid:
                 await state.clear()
-                await query.answer(
-                    "Phiên nhập đã hết hạn, vui lòng bấm Lên kèo lại.", show_alert=True
-                )
+                await query.answer("Phiên nhập đã hết hạn, vui lòng thử lại.", show_alert=True)
                 return
             draft.faq = callback_data.value if action == "pick_faq" else ""
             user_id = query.from_user.id if query.from_user else 0
+            toast = "✅ Đã cập nhật kèo!" if draft.edit_watch_id is not None else "✅ Đã lên kèo!"
             await _finalize_wizard(msg, state, watch_service, draft, user_id, edit_existing=True)
-            await query.answer("✅ Đã lên kèo!")
+            await query.answer(toast)
             return
 
         await query.answer()
@@ -432,14 +434,15 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 await query.answer()
                 return
             if action == "edit":
-                await state.clear()
                 item = await watch_service.get_watch(msg.chat.id, watch_id)
-                await _safe_edit(
+                await _start_wizard(
                     msg,
-                    format_watch_card(item, title="✏️ Chọn mục cần sửa"),
-                    build_edit_menu_keyboard(item.id),
+                    state,
+                    DealDraft(uid=item.uid, edit_watch_id=item.id),
+                    step=2,
+                    edit_existing=True,
                 )
-                await query.answer()
+                await query.answer("✏️ Nhập lại thông tin kèo!")
                 return
             if action == "delete":
                 existing = await watch_service.get_watch(msg.chat.id, watch_id)
@@ -489,105 +492,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
         await query.answer(toast)
 
-    @router.callback_query(EditWatchCallback.filter())
-    async def cb_edit_watch(
-        query: CallbackQuery,
-        callback_data: EditWatchCallback,
-        state: FSMContext,
-    ) -> None:
-        msg = query.message
-        if not isinstance(msg, Message):
-            await query.answer()
-            return
-        action = callback_data.action
-        watch_id = callback_data.watch_id
-        try:
-            if action == "back":
-                await state.clear()
-                item = await watch_service.get_watch(msg.chat.id, watch_id)
-                await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
-                await query.answer()
-                return
-            if action == "menu":
-                await state.clear()
-                item = await watch_service.get_watch(msg.chat.id, watch_id)
-                await _safe_edit(
-                    msg,
-                    format_watch_card(item, title="✏️ Chọn mục cần sửa"),
-                    build_edit_menu_keyboard(item.id),
-                )
-                await query.answer()
-                return
-            if action == "field" and callback_data.field in ("note", "price", "faq"):
-                item = await watch_service.get_watch(msg.chat.id, watch_id)
-                await state.set_state(EditWatchStates.waiting_value)
-                await state.update_data(
-                    edit_watch_id=item.id,
-                    edit_field=callback_data.field,
-                    edit_message_id=msg.message_id,
-                )
-                await _safe_edit(
-                    msg,
-                    format_edit_prompt(item, callback_data.field),
-                    build_edit_field_keyboard(item.id, callback_data.field),
-                )
-                await query.answer()
-                return
-            if action == "pick" and callback_data.field in ("note", "price", "faq"):
-                item = await watch_service.update_watch_field(
-                    msg.chat.id,
-                    watch_id,
-                    callback_data.field,
-                    callback_data.value,
-                )
-                await state.clear()
-                await _safe_edit(msg, format_watch_card(item), build_watch_keyboard(item))
-                await query.answer("✅ Đã cập nhật kèo!")
-                return
-        except ValueError as exc:
-            await state.clear()
-            await query.answer(str(exc), show_alert=True)
-            return
-        await query.answer()
-
-    @router.message(EditWatchStates.waiting_value, F.text, ~F.text.startswith("/"))
-    async def handle_edit_watch_value(message: Message, state: FSMContext, bot: Bot) -> None:
-        data = await state.get_data()
-        watch_id = data.get("edit_watch_id")
-        raw_field = data.get("edit_field")
-        edit_message_id = data.get("edit_message_id")
-        await state.clear()
-        if not isinstance(watch_id, int) or raw_field not in ("note", "price", "faq"):
-            return
-        try:
-            item = await watch_service.update_watch_field(
-                message.chat.id,
-                watch_id,
-                raw_field,
-                (message.text or "").strip(),
-            )
-        except ValueError as exc:
-            await message.answer(f"❌ {exc}")
-            return
-
-        text = format_watch_card(item)
-        markup = build_watch_keyboard(item)
-        if isinstance(edit_message_id, int):
-            try:
-                await bot.edit_message_text(
-                    chat_id=message.chat.id,
-                    message_id=edit_message_id,
-                    text=text,
-                    reply_markup=markup,
-                    disable_web_page_preview=True,
-                )
-                with contextlib.suppress(TelegramBadRequest):
-                    await message.delete()
-                return
-            except TelegramBadRequest:
-                pass
-        await message.answer(text, reply_markup=markup)
-
     return router
 
 
@@ -629,7 +533,8 @@ async def _start_wizard(
         4: WizardStates.waiting_faq,
     }[step]
     text = format_wizard_step(step, draft)
-    markup = build_wizard_keyboard(step=step)
+    min_step = 2 if draft.edit_watch_id is not None else 1
+    markup = build_wizard_keyboard(step=step, min_step=min_step)
     if edit_existing:
         await _safe_edit(message, text, markup)
         draft.wizard_message_id = message.message_id
@@ -655,7 +560,8 @@ async def _advance_wizard_in_place(
         4: WizardStates.waiting_faq,
     }[next_step]
     text = format_wizard_step(next_step, draft)
-    markup = build_wizard_keyboard(step=next_step)
+    min_step = 2 if draft.edit_watch_id is not None else 1
+    markup = build_wizard_keyboard(step=next_step, min_step=min_step)
 
     if draft.wizard_message_id is not None:
         try:
@@ -691,26 +597,40 @@ async def _finalize_wizard(
 ) -> None:
     note = draft.note or "Theo dõi nhanh"
     price = draft.price or "0"
-    raw_line = f"{draft.uid} | {note} | {price}"
-    if draft.faq:
-        raw_line += f" | {draft.faq}"
 
     await state.clear()
-    try:
-        item = await watch_service.add_watch(message.chat.id, user_id, raw_line)
-    except DuplicateWatchError as exc:
-        text = f"⚠️ {exc}\nBấm nút dưới để mở kèo cũ:"
-        markup = _duplicate_watch_keyboard(exc.existing.id, in_wizard=False)
-        if edit_existing:
-            await _safe_edit(message, text, markup)
-        else:
-            await message.answer(text, reply_markup=markup)
-        return
-    except ValueError as exc:
-        await message.answer(f"❌ {exc}")
-        return
+    if draft.edit_watch_id is not None:
+        try:
+            item = await watch_service.update_watch(
+                message.chat.id,
+                draft.edit_watch_id,
+                note=note,
+                price=price,
+                faq=draft.faq,
+            )
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}")
+            return
+        text = format_watch_card(item, title="✅ Đã cập nhật kèo thành công!")
+    else:
+        raw_line = f"{draft.uid} | {note} | {price}"
+        if draft.faq:
+            raw_line += f" | {draft.faq}"
+        try:
+            item = await watch_service.add_watch(message.chat.id, user_id, raw_line)
+        except DuplicateWatchError as exc:
+            text = f"⚠️ {exc}\nBấm nút dưới để mở kèo cũ:"
+            markup = _duplicate_watch_keyboard(exc.existing.id, in_wizard=False)
+            if edit_existing:
+                await _safe_edit(message, text, markup)
+            else:
+                await message.answer(text, reply_markup=markup)
+            return
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}")
+            return
+        text = format_watch_card(item, title="✅ Đã thêm UID thành công!")
 
-    text = format_watch_card(item, title="✅ Đã thêm UID thành công!")
     markup = build_watch_keyboard(item)
 
     if edit_existing:

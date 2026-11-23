@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 import structlog
 from redis.asyncio import Redis
@@ -415,21 +415,20 @@ class WatchService:
         item.is_hidden = hidden
         return item
 
-    async def update_watch_field(
+    async def update_watch(
         self,
         chat_id: int,
         watch_id: int,
-        field: Literal["note", "price", "faq"],
-        value: str,
+        *,
+        note: str,
+        price: str,
+        faq: str,
     ) -> WatchItem:
         item = await self._require_owned(chat_id, watch_id)
-        cleaned = value.strip()
-        if field == "note":
-            item.note = cleaned or "Theo dõi nhanh"
-        elif field == "price":
-            item.price = cleaned or "0"
-        elif field == "faq":
-            item.faq = "" if cleaned == "-" else cleaned
+        item.note = note.strip() or "Theo dõi nhanh"
+        item.price = price.strip() or "0"
+        cleaned_faq = faq.strip()
+        item.faq = "" if cleaned_faq == "-" else cleaned_faq
         is_hidden = item.is_hidden
         updated = await self._repo.update(item)
         updated.is_hidden = is_hidden
