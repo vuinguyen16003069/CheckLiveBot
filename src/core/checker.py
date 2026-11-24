@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import logging
 import random
@@ -127,11 +128,12 @@ class CurlCffiFacebookChecker:
         return await self._check_direct(uid)
 
     async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
-        """Best-effort fetch of public Facebook name and avatar URL for a LIVE UID (no login)."""
+        """Best-effort fast fetch of public Facebook name and avatar URL (streams only <head>)."""
         url = f"https://www.facebook.com/profile.php?id={uid}"
         kwargs: dict[str, Any] = {
             "timeout": (self._connect_timeout, self._timeout),
             "allow_redirects": True,
+            "stream": True,
             "headers": {
                 "Accept": "text/html,application/xhtml+xml",
                 "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
@@ -143,15 +145,36 @@ class CurlCffiFacebookChecker:
         proxy = self._proxy_pool.next_proxy()
         if proxy:
             kwargs["proxy"] = proxy
+        response: Any = None
         try:
-            response: Any = await self._session.get(url, **kwargs)
-            body = getattr(response, "text", "")
-            if not isinstance(body, str) or not body:
+            response = await self._session.get(url, **kwargs)
+            iter_content = getattr(response, "aiter_content", None)
+            if callable(iter_content):
+                buf = bytearray()
+                async for chunk in response.aiter_content():
+                    buf.extend(chunk)
+                    if (
+                        (b"og:title" in buf and b"og:image" in buf)
+                        or b"</head>" in buf
+                        or len(buf) >= 65536
+                    ):
+                        break
+                body = bytes(buf).decode("utf-8", errors="ignore")
+            else:
+                raw_text = getattr(response, "text", "")
+                body = raw_text if isinstance(raw_text, str) else ""
+            if not body:
                 return None, None
             return parse_public_profile_html(body)
         except Exception as exc:
             logger.debug("fb_profile_info_failed uid=%s error=%s", uid, exc)
             return None, None
+        finally:
+            if response is not None:
+                aclose = getattr(response, "aclose", None)
+                if callable(aclose):
+                    with contextlib.suppress(Exception):
+                        await response.aclose()
 
     async def close(self) -> None:
         pending = list(self._inflight.values())

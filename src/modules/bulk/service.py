@@ -72,11 +72,26 @@ class BulkCheckService:
     async def check_single_uid_profile(
         self, raw_uid: str
     ) -> tuple[str, CheckOutcome, str | None, str | None]:
-        uid, outcome = await self.check_single_uid(raw_uid)
-        if outcome == CheckOutcome.LIVE:
-            fb_name, avatar_url = await self._checker.fetch_profile_info(uid)
-            return uid, outcome, fb_name, avatar_url
-        return uid, outcome, None, None
+        uid = extract_uid(raw_uid)
+        if not uid:
+            raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
+
+        profile_task = asyncio.create_task(self._checker.fetch_profile_info(uid))
+        try:
+            result = await self._checker.check(uid)
+            if result.outcome != CheckOutcome.LIVE:
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+                return uid, result.outcome, None, None
+            fb_name, avatar_url = await profile_task
+            return uid, result.outcome, fb_name, avatar_url
+        except BaseException:
+            if not profile_task.done():
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+            raise
 
     def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int]:
         uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 from datetime import UTC, datetime, timedelta
@@ -339,29 +340,49 @@ class WatchService:
                 return await self._repo.count_active_die(chat_id)
             return 0
 
-        # Run Redis pre-checks and live Facebook check concurrently to cut latency
-        existing, active_count, is_hidden, res = await asyncio.gather(
-            self._repo.find_by_uid(chat_id, parsed.uid),
-            _count_die(),
-            self._repo.get_chat_hidden(chat_id),
-            self._checker.check(parsed.uid),
-        )
-        if existing is not None:
-            existing.is_hidden = is_hidden
-            raise DuplicateWatchError(existing)
-
-        if self._max_active_per_chat > 0 and active_count >= self._max_active_per_chat:
-            raise ValueError(
-                f"Chat đã đạt giới hạn {self._max_active_per_chat} kèo DIE đang theo dõi."
+        # Run Redis pre-checks, live Facebook check, and profile head stream concurrently
+        profile_task = asyncio.create_task(self._checker.fetch_profile_info(parsed.uid))
+        try:
+            existing, active_count, is_hidden, res = await asyncio.gather(
+                self._repo.find_by_uid(chat_id, parsed.uid),
+                _count_die(),
+                self._repo.get_chat_hidden(chat_id),
+                self._checker.check(parsed.uid),
             )
+            if existing is not None:
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+                existing.is_hidden = is_hidden
+                raise DuplicateWatchError(existing)
 
-        initial_status = WatchStatus.LIVE if res.outcome == CheckOutcome.LIVE else WatchStatus.DIE
-        fb_name = ""
-        avatar_url = ""
-        if initial_status == WatchStatus.LIVE:
-            fetched_name, fetched_avatar = await self._checker.fetch_profile_info(parsed.uid)
-            fb_name = fetched_name or ""
-            avatar_url = fetched_avatar or ""
+            if self._max_active_per_chat > 0 and active_count >= self._max_active_per_chat:
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+                raise ValueError(
+                    f"Chat đã đạt giới hạn {self._max_active_per_chat} kèo DIE đang theo dõi."
+                )
+
+            initial_status = (
+                WatchStatus.LIVE if res.outcome == CheckOutcome.LIVE else WatchStatus.DIE
+            )
+            fb_name = ""
+            avatar_url = ""
+            if initial_status == WatchStatus.LIVE:
+                fetched_name, fetched_avatar = await profile_task
+                fb_name = fetched_name or ""
+                avatar_url = fetched_avatar or ""
+            else:
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+        except BaseException:
+            if not profile_task.done():
+                profile_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await profile_task
+            raise
         item = await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
