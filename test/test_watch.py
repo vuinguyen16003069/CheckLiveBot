@@ -426,7 +426,7 @@ async def test_unified_90d_ttl_on_all_keys_and_lazy_prune() -> None:
     await redis.delete(f"test:watch:{w_die.id}", f"test:watch:{w_done.id}")
 
     # Inject a non-DIE stale id into watches:die to verify list_die_items prunes both kinds
-    await redis.sadd("test:watches:die", str(w_live.id))  # type: ignore[misc]
+    await redis.sadd("test:watches:die", str(w_live.id))
 
     # On-demand pruning via ZREMRANGEBYSCORE & lazy SREM/HDEL (no background cron!)
     stats = await svc.get_stats(100)

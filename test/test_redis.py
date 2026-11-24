@@ -52,11 +52,11 @@ async def get_value_by_type(r: Redis, key: str, key_type: str, full: bool = Fals
         return raw
 
     if key_type == "hash":
-        return await r.hgetall(key)  # type: ignore[misc]
+        return await r.hgetall(key)
     if key_type == "list":
-        return await r.lrange(key, 0, -1)  # type: ignore[misc]
+        return await r.lrange(key, 0, -1)
     if key_type == "set":
-        members = cast(set[str], await r.smembers(key))  # type: ignore[misc]
+        members = cast(set[str], await r.smembers(key))
         return sorted(members)
     if key_type == "zset":
         return await r.zrange(key, 0, -1, withscores=True)
@@ -74,7 +74,7 @@ async def get_all_keys(r: Redis, pattern: str = "*") -> list[str]:
 async def get_key_snapshot(r: Redis, key: str, full: bool = False) -> dict[str, Any]:
     """Chụp snapshot trạng thái của 1 key: kiểu dữ liệu, TTL và giá trị."""
     key_type = str(await r.type(key))
-    ttl = int(await r.ttl(key))
+    ttl = await r.ttl(key)
     val = await get_value_by_type(r, key, key_type, full=full)
     return {"type": key_type, "ttl": ttl, "value": val}
 
@@ -383,9 +383,9 @@ async def test_redis_manager_helpers_offline(tmp_path: Path) -> None:
         ex=3600,
     )
     await r.set("checklivebot:raw:long", "x" * 250)
-    await r.hset("checklivebot:chat_uid:100", "100099", "1")  # type: ignore[misc]
-    await r.rpush("checklivebot:list:1", "a", "b")  # type: ignore[misc]
-    await r.sadd("checklivebot:watches:die", "2", "1")  # type: ignore[misc]
+    await r.hset("checklivebot:chat_uid:100", "100099", "1")
+    await r.rpush("checklivebot:list:1", "a", "b")
+    await r.sadd("checklivebot:watches:die", "2", "1")
     await r.zadd("checklivebot:watches:chat:100", {"1": 1234.5})
 
     keys = await get_all_keys(r)

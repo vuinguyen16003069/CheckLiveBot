@@ -72,7 +72,7 @@ class RedisWatchRepository:
         status: WatchStatus,
     ) -> WatchItem:
         seq_key = self._k("seq:watch_id")
-        watch_id = int(await self._redis.incr(seq_key))
+        watch_id = await self._redis.incr(seq_key)
         now = datetime.now(UTC)
         item = WatchItem(
             id=watch_id,
@@ -108,13 +108,13 @@ class RedisWatchRepository:
         return item
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
-        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))  # type: ignore[misc]
+        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))
         if not raw_id:
             return None
         item = await self.get(int(raw_id))
         if item is not None and item.chat_id == chat_id and item.uid == uid:
             return item
-        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)
         return None
 
     async def get(self, watch_id: int) -> WatchItem | None:
@@ -132,14 +132,14 @@ class RedisWatchRepository:
         return WatchItem.model_validate_json(raw_item), raw_hidden == "1"
 
     async def find_by_uid_with_hidden(self, chat_id: int, uid: str) -> WatchItem | None:
-        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))  # type: ignore[misc]
+        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))
         if not raw_id:
             return None
         item, is_hidden = await self.get_with_hidden(chat_id, int(raw_id))
         if item is not None and item.chat_id == chat_id and item.uid == uid:
             item.is_hidden = is_hidden
             return item
-        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)
         return None
 
     async def update(
@@ -197,7 +197,7 @@ class RedisWatchRepository:
 
     async def list_die_items(self) -> list[WatchItem]:
         die_key = self._k("watches:die")
-        ids = list(cast(set[str], await self._redis.smembers(die_key)))  # type: ignore[misc]
+        ids = list(cast(set[str], await self._redis.smembers(die_key)))
         if not ids:
             return []
         raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in ids])
@@ -213,7 +213,7 @@ class RedisWatchRepository:
             else:
                 stale_ids.append(wid)
         if stale_ids:
-            await self._redis.srem(die_key, *stale_ids)  # type: ignore[misc]
+            await self._redis.srem(die_key, *stale_ids)
         return items
 
     async def list_chat_items(
