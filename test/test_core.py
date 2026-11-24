@@ -101,8 +101,22 @@ def test_settings_logging_and_redis_client_config() -> None:
             None,
         ),
         ({"error": {"code": 100}}, 200, CheckOutcome.DIE, "graph_error"),
+        ({"error": {"code": 4}}, 400, CheckOutcome.ERROR, "graph_transient_4"),
+        ({"error": {"code": 17}}, 400, CheckOutcome.ERROR, "graph_transient_17"),
+        (
+            {"error": {"code": 999, "is_transient": True}},
+            400,
+            CheckOutcome.ERROR,
+            "graph_transient_999",
+        ),
         ({"data": None}, 200, CheckOutcome.DIE, "no_data_http_200"),
         ({"data": {}}, 200, CheckOutcome.DIE, "missing_avatar_dimensions"),
+        (
+            {"data": {"height": True, "width": 50, "url": "https://scontent.xx.fbcdn.net/a.jpg"}},
+            200,
+            CheckOutcome.DIE,
+            "missing_avatar_dimensions",
+        ),
         (
             {"data": {"height": 0, "width": 50, "url": "https://scontent.xx.fbcdn.net/a.jpg"}},
             200,
@@ -287,3 +301,61 @@ async def test_run_watcher_loop_recovers_from_errors_and_stops() -> None:
     task = asyncio.create_task(run_watcher_loop(_FlakyScanner(), 3, stop_event))  # type: ignore[arg-type]
     await asyncio.wait_for(task, timeout=6.0)
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_proxy_pool_cooldown_and_singleflight_and_transient_retry() -> None:
+    # Health-aware ProxyPool skips failing proxy and recovers on success
+    pool = ProxyPool(["http://p1:8080", "http://p2:8080"], base_cooldown_seconds=30.0)
+    assert pool.next_proxy() == "http://p1:8080"
+    pool.report_failure("http://p1:8080")
+    assert pool.next_proxy() == "http://p2:8080"
+    assert pool.next_proxy() == "http://p2:8080"
+    pool.report_success("http://p1:8080")
+    assert pool.next_proxy() == "http://p1:8080"
+
+    # Graph transient error (code 4) retries with next proxy instead of false DIE
+    transient_session = _FakeSession(
+        [
+            _resp(400, {"error": {"code": 4, "message": "Rate limit"}}),
+            _resp(200, {"data": {"height": 50, "width": 50, "url": "https://img/a.jpg"}}),
+        ]
+    )
+    checker_t = CurlCffiFacebookChecker(
+        timeout_seconds=4.0,
+        max_retries=2,
+        proxies=["http://p1:8080", "http://p2:8080"],
+        session=transient_session,  # type: ignore[arg-type]
+    )
+    res_t = await checker_t.check("100088")
+    assert res_t.outcome == CheckOutcome.LIVE
+    assert len(transient_session.calls) == 2
+    assert transient_session.calls[0][1]["timeout"] == (2.0, 4.0)
+
+    # Singleflight coalesces concurrent check() calls into 1 HTTP request; verify_live stays independent
+    class _SlowSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            self.calls += 1
+            await asyncio.sleep(0.05)
+            return _resp(200, {"data": {"height": 50, "width": 50, "url": "https://img/a.jpg"}})
+
+        async def close(self) -> None:
+            return None
+
+    slow_session = _SlowSession()
+    checker_sf = CurlCffiFacebookChecker(
+        timeout_seconds=4.0,
+        max_retries=1,
+        verify_delay_seconds=0.0,
+        session=slow_session,  # type: ignore[arg-type]
+    )
+    results = await asyncio.gather(*(checker_sf.check("100077") for _ in range(5)))
+    assert all(r.outcome == CheckOutcome.LIVE for r in results)
+    assert slow_session.calls == 1
+
+    verified = await checker_sf.verify_live("100077")
+    assert verified.outcome == CheckOutcome.LIVE
+    assert slow_session.calls == 2

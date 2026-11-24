@@ -18,13 +18,17 @@ class BulkSummary(BaseModel):
     elapsed_seconds: float
 
 
+_PROFILE_URL_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", re.IGNORECASE)
+_EMBEDDED_UID_RE = re.compile(r"\b([1-9]\d{4,19})\b")
+
+
 def extract_uid(raw: str) -> str | None:
     text = raw.strip()
     if not text:
         return None
-    if re.fullmatch(r"[1-9]\d{0,19}", text):
-        return text
-    if match := re.search(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", text, re.IGNORECASE):
+    if text.isascii() and text.isdigit():
+        return text if len(text) <= 20 and text[0] != "0" else None
+    if match := _PROFILE_URL_RE.search(text):
         return match.group(1)
     return None
 
@@ -40,7 +44,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = re.search(r"\b([1-9]\d{4,19})\b", stripped)
+            token_match = _EMBEDDED_UID_RE.search(stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1
@@ -71,12 +75,21 @@ def format_bulk_progress(
     live: int,
     die: int,
     error: int,
+    elapsed_seconds: float = 0.0,
 ) -> str:
     bar = render_progress_bar(done, total)
+    speed_line = ""
+    if done > 0 and elapsed_seconds >= 0.2:
+        rate = done / elapsed_seconds
+        remaining = max(0, total - done)
+        eta_sec = int(remaining / rate) if rate > 0 else 0
+        eta_text = f"{eta_sec // 60}m{eta_sec % 60:02d}s" if eta_sec >= 60 else f"{eta_sec}s"
+        speed_line = f"\n⚡ <b>{rate:,.0f} UID/s</b> | ⏳ ETA ~<b>{eta_text}</b>"
     return (
         f"⚙️ <b>Đang kiểm tra hàng loạt</b> (<code>#{html.escape(job_id)}</code>)\n\n"
         f"<code>{bar}</code> ({done:,}/{total:,})\n"
         f"✅ LIVE: <b>{live:,}</b> | ❌ DIE: <b>{die:,}</b> | ⚠️ Lỗi: <b>{error:,}</b>"
+        f"{speed_line}"
     )
 
 

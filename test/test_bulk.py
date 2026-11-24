@@ -114,6 +114,9 @@ def test_extract_uids_deduplicates_caps_and_formats() -> None:
     assert render_progress_bar(99, 10, width=4) == "[████] 100%"
 
     assert "#job1" in format_bulk_progress("job1", 5, 10, 2, 2, 1)
+    speed_progress = format_bulk_progress("job1", 500, 1000, 300, 150, 50, elapsed_seconds=2.5)
+    assert "200 UID/s" in speed_progress
+    assert "ETA" in speed_progress
     summary = BulkSummary(job_id="job1", total=10, live=6, die=3, error=1, elapsed_seconds=1.25)
     assert "1.2s" in format_bulk_summary(summary) or "1.3s" in format_bulk_summary(summary)
     assert "LIVE" in format_single_check("4", CheckOutcome.LIVE)

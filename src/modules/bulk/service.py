@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
 from collections.abc import Sequence
 from typing import Any
-
-import structlog
 
 from src.core.ports import (
     BulkNotifierPort,
@@ -22,7 +21,7 @@ from src.modules.bulk.domain import (
     format_bulk_summary,
 )
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class BulkCheckService:
@@ -59,7 +58,7 @@ class BulkCheckService:
             return False
         self._chat_jobs.pop(chat_id, None)
         task.cancel()
-        logger.info("bulk_job_cancel_requested", job_id=active_job_id, chat_id=chat_id)
+        logger.info("bulk_job_cancel_requested job_id=%s chat_id=%s", active_job_id, chat_id)
         return True
 
     async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
@@ -103,10 +102,10 @@ class BulkCheckService:
                     notifier=notifier,
                 )
             except asyncio.CancelledError:
-                logger.info("bulk_job_cancelled", job_id=job_id, chat_id=chat_id)
+                logger.info("bulk_job_cancelled job_id=%s chat_id=%s", job_id, chat_id)
                 raise
             except Exception as exc:
-                logger.exception("bulk_job_failed", job_id=job_id, error=str(exc))
+                logger.exception("bulk_job_failed job_id=%s error=%s", job_id, exc)
                 with contextlib.suppress(Exception):
                     await notifier.update_progress(
                         chat_id,
@@ -121,7 +120,7 @@ class BulkCheckService:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(lambda _t: _release_chat())
-        logger.info("bulk_job_started", job_id=job_id, chat_id=chat_id, total=len(uids))
+        logger.info("bulk_job_started job_id=%s chat_id=%s total=%s", job_id, chat_id, len(uids))
 
     def start_bulk_text(
         self,
@@ -158,55 +157,58 @@ class BulkCheckService:
         error_uids: list[str] = []
 
         done = 0
-        last_update = 0.0
+        uid_iter = iter(uids)
+        workers_done = asyncio.Event()
 
-        async def _maybe_update(force: bool = False) -> None:
-            nonlocal last_update
-            now = time.monotonic()
-            if force or (now - last_update) >= self._progress_interval:
-                last_update = now
-                text = format_bulk_progress(
-                    job_id=job_id,
-                    done=done,
-                    total=total,
-                    live=len(live_uids),
-                    die=len(die_uids),
-                    error=len(error_uids),
-                )
-                await notifier.update_progress(chat_id, status_message_id, text)
+        async def _push_progress() -> None:
+            text = format_bulk_progress(
+                job_id=job_id,
+                done=done,
+                total=total,
+                live=len(live_uids),
+                die=len(die_uids),
+                error=len(error_uids),
+                elapsed_seconds=time.monotonic() - started,
+            )
+            await notifier.update_progress(chat_id, status_message_id, text)
 
-        uid_queue: asyncio.Queue[str] = asyncio.Queue()
-        for uid in uids:
-            uid_queue.put_nowait(uid)
+        async def _progress_reporter() -> None:
+            last_sent = -1
+            while not workers_done.is_set():
+                if done > last_sent:
+                    last_sent = done
+                    await _push_progress()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(workers_done.wait(), timeout=self._progress_interval)
+            if done > last_sent:
+                await _push_progress()
 
         async def _worker() -> None:
             nonlocal done
-            while True:
-                try:
-                    target_uid = uid_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                try:
-                    res = await self._checker.check(target_uid)
-                    if res.outcome == CheckOutcome.LIVE:
-                        live_uids.append(target_uid)
-                    elif res.outcome == CheckOutcome.DIE:
-                        die_uids.append(target_uid)
-                    else:
-                        error_uids.append(target_uid)
-                    done += 1
-                    await _maybe_update(force=False)
-                finally:
-                    uid_queue.task_done()
+            for target_uid in uid_iter:
+                res = await self._checker.check(target_uid)
+                if res.outcome == CheckOutcome.LIVE:
+                    live_uids.append(target_uid)
+                elif res.outcome == CheckOutcome.DIE:
+                    die_uids.append(target_uid)
+                else:
+                    error_uids.append(target_uid)
+                done += 1
 
         worker_count = min(self._concurrency, total)
+        reporter_task = asyncio.create_task(_progress_reporter(), name=f"bulk-progress:{job_id}")
         workers = [asyncio.create_task(_worker()) for _ in range(worker_count)]
         try:
             await asyncio.gather(*workers)
         finally:
+            workers_done.set()
             for w in workers:
                 if not w.done():
                     w.cancel()
+            if not reporter_task.done():
+                reporter_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reporter_task
 
         elapsed = time.monotonic() - started
         summary = BulkSummary(
@@ -229,14 +231,14 @@ class BulkCheckService:
             status_message_id=status_message_id,
         )
         logger.info(
-            "bulk_job_completed",
-            job_id=job_id,
-            chat_id=chat_id,
-            total=total,
-            live=summary.live,
-            die=summary.die,
-            error=summary.error,
-            elapsed=round(elapsed, 2),
+            "bulk_job_completed job_id=%s chat_id=%s total=%s live=%s die=%s error=%s elapsed=%.2f",
+            job_id,
+            chat_id,
+            total,
+            summary.live,
+            summary.die,
+            summary.error,
+            elapsed,
         )
         return summary
 

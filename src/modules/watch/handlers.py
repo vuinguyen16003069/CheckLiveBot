@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from functools import partial
 
-import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
@@ -47,7 +47,7 @@ from src.modules.watch.ui import (
     recover_draft_from_text,
 )
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class TelegramWatchNotifier:
@@ -69,10 +69,10 @@ class TelegramWatchNotifier:
                 await send()
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             logger.warning(
-                "watcher_notify_unreachable",
-                watch_id=item.id,
-                chat_id=item.chat_id,
-                error=str(exc),
+                "watcher_notify_unreachable watch_id=%s chat_id=%s error=%s",
+                item.id,
+                item.chat_id,
+                exc,
             )
 
 
@@ -136,14 +136,9 @@ def create_watch_router(watch_service: WatchService) -> Router:
             await message.answer(format_watch_card(item), reply_markup=_back_keyboard(item))
             return
 
-        tmp = await message.answer("⚡", reply_markup=build_reply_keyboard())
-        stats, _ = await asyncio.gather(
+        tmp, stats = await asyncio.gather(
+            message.answer("⚡", reply_markup=build_reply_keyboard()),
             watch_service.get_stats(message.chat.id),
-            asyncio.sleep(1.0),
-        )
-        stats, _ = await asyncio.gather(
-            watch_service.get_stats(message.chat.id),
-            asyncio.sleep(1.0),
         )
         with contextlib.suppress(TelegramBadRequest):
             await tmp.delete()

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import sys
 from typing import Any
 
-import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -21,7 +21,7 @@ from src.modules.bulk.service import BulkCheckService
 from src.modules.watch.handlers import TelegramWatchNotifier, create_watch_router
 from src.modules.watch.service import RedisWatchRepository, WatcherScanService, WatchService
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def install_uvloop_if_available() -> None:
@@ -39,14 +39,14 @@ async def run_watcher_loop(
 ) -> None:
     """Dedicated low-latency watcher loop polling DIE watches."""
     delay = max(3, interval_seconds)
-    logger.info("watcher_loop_started", interval_seconds=delay)
+    logger.info("watcher_loop_started interval_seconds=%s", delay)
     while not stop_event.is_set():
         try:
             await scanner.scan_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("watcher_scan_error", error=str(exc))
+            logger.warning("watcher_scan_error error=%s", exc)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=delay)
     logger.info("watcher_loop_stopped")

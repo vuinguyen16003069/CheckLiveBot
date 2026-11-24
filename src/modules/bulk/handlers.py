@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import logging
 import time
 from collections.abc import Sequence
 
-import structlog
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -31,7 +31,7 @@ from src.modules.bulk.domain import (
 from src.modules.bulk.service import BulkCheckService
 from src.modules.watch.ui import ListLookupStates, QuickWatchCallback
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class RecheckSingleCallback(CallbackData, prefix="rc"):
@@ -74,11 +74,11 @@ class TelegramBulkNotifier:
             )
         except TelegramRetryAfter as exc:
             self._retry_until = time.monotonic() + float(exc.retry_after)
-            logger.warning("telegram_progress_rate_limited", retry_after=exc.retry_after)
+            logger.warning("telegram_progress_rate_limited retry_after=%s", exc.retry_after)
         except TelegramBadRequest:
             pass
         except Exception as exc:
-            logger.warning("telegram_progress_update_failed", error=str(exc))
+            logger.warning("telegram_progress_update_failed error=%s", exc)
 
     async def send_bulk_results(
         self,
@@ -207,8 +207,27 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
 
         buf = io.BytesIO()
         await bot.download(document, destination=buf)
-        text = buf.getvalue().decode("utf-8", errors="ignore")
-        await _start_bulk(message, bulk_service, text)
+        raw_bytes = buf.getvalue()
+        if bulk_service.is_chat_busy(message.chat.id):
+            await message.answer(
+                "⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất."
+            )
+            return
+        try:
+            if len(raw_bytes) > 65536:
+                job_id, uids, _ = await asyncio.to_thread(
+                    lambda: bulk_service.prepare_bulk_text(
+                        raw_bytes.decode("utf-8", errors="ignore")
+                    )
+                )
+            else:
+                job_id, uids, _ = bulk_service.prepare_bulk_text(
+                    raw_bytes.decode("utf-8", errors="ignore")
+                )
+        except ValueError as exc:
+            await message.answer(f"❌ {exc}")
+            return
+        await _start_bulk_prepared(message, bulk_service, job_id, uids)
 
     @router.message(
         StateFilter(None, ListLookupStates.waiting_uid),
@@ -256,20 +275,6 @@ async def _reply_single_check(
         format_single_check(uid, outcome),
         reply_markup=build_single_check_markup(uid, outcome),
     )
-
-
-async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: str) -> None:
-    if message.bot is None:
-        return
-    if bulk_service.is_chat_busy(message.chat.id):
-        await message.answer("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
-        return
-    try:
-        job_id, uids, _ = bulk_service.prepare_bulk_text(text)
-    except ValueError as exc:
-        await message.answer(f"❌ {exc}")
-        return
-    await _start_bulk_prepared(message, bulk_service, job_id, uids)
 
 
 async def _start_bulk_prepared(

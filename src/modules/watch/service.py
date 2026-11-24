@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
-import structlog
 from redis.asyncio import Redis
 
 from src.core.ports import CheckOutcome, FacebookCheckerPort, LockPort
@@ -16,7 +16,7 @@ from src.modules.watch.domain import (
     parse_add_line,
 )
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class DuplicateWatchError(ValueError):
@@ -123,6 +123,25 @@ class RedisWatchRepository:
             return None
         return WatchItem.model_validate_json(raw)
 
+    async def get_with_hidden(self, chat_id: int, watch_id: int) -> tuple[WatchItem | None, bool]:
+        raw_item, raw_hidden = await self._redis.mget(
+            [self._k(f"watch:{watch_id}"), self._k(f"pref:hidden:{chat_id}")]
+        )
+        if not raw_item:
+            return None, raw_hidden == "1"
+        return WatchItem.model_validate_json(raw_item), raw_hidden == "1"
+
+    async def find_by_uid_with_hidden(self, chat_id: int, uid: str) -> WatchItem | None:
+        raw_id = cast(str | None, await self._redis.hget(self._k(f"chat_uid:{chat_id}"), uid))  # type: ignore[misc]
+        if not raw_id:
+            return None
+        item, is_hidden = await self.get_with_hidden(chat_id, int(raw_id))
+        if item is not None and item.chat_id == chat_id and item.uid == uid:
+            item.is_hidden = is_hidden
+            return item
+        await self._redis.hdel(self._k(f"chat_uid:{chat_id}"), uid)  # type: ignore[misc]
+        return None
+
     async def update(
         self,
         item: WatchItem,
@@ -212,16 +231,25 @@ class RedisWatchRepository:
             else self._k(f"watches:chat:{chat_id}")
         )
         cutoff = self._cutoff_ts(now)
-        async with self._redis.pipeline(transaction=False) as pipe:
-            pipe.zremrangebyscore(key, "-inf", cutoff)
-            pipe.zcard(key)
-            _, total_raw = await pipe.execute()
-        total = int(total_raw)
-        total_pages = max(1, math.ceil(total / page_size))
-        safe_page = min(max(1, page), total_pages)
-        start = (safe_page - 1) * page_size
-        end = start + page_size - 1
-        ids = await self._redis.zrevrange(key, start, end)
+        if page <= 1:
+            async with self._redis.pipeline(transaction=False) as pipe:
+                pipe.zremrangebyscore(key, "-inf", cutoff)
+                pipe.zcard(key)
+                pipe.zrevrange(key, 0, page_size - 1)
+                _, total_raw, ids = await pipe.execute()
+            total = int(total_raw)
+            total_pages = max(1, math.ceil(total / page_size))
+        else:
+            async with self._redis.pipeline(transaction=False) as pipe:
+                pipe.zremrangebyscore(key, "-inf", cutoff)
+                pipe.zcard(key)
+                _, total_raw = await pipe.execute()
+            total = int(total_raw)
+            total_pages = max(1, math.ceil(total / page_size))
+            safe_page = min(page, total_pages)
+            start = (safe_page - 1) * page_size
+            end = start + page_size - 1
+            ids = await self._redis.zrevrange(key, start, end)
         if not ids:
             return [], total, total_pages
         raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in ids])
@@ -263,6 +291,22 @@ class RedisWatchRepository:
         else:
             await self._redis.delete(key)
 
+    async def set_chat_hidden_and_get(
+        self, chat_id: int, watch_id: int, hidden: bool
+    ) -> WatchItem | None:
+        pref_key = self._k(f"pref:hidden:{chat_id}")
+        watch_key = self._k(f"watch:{watch_id}")
+        async with self._redis.pipeline(transaction=False) as pipe:
+            if hidden:
+                pipe.set(pref_key, "1", ex=self._ttl_seconds)
+            else:
+                pipe.delete(pref_key)
+            pipe.get(watch_key)
+            _, raw_item = await pipe.execute()
+        if not raw_item:
+            return None
+        return WatchItem.model_validate_json(raw_item)
+
 
 class WatchService:
     def __init__(
@@ -281,10 +325,7 @@ class WatchService:
         self._concurrency = max(1, concurrency)
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
-        item = await self._repo.find_by_uid(chat_id, uid)
-        if item is not None:
-            item.is_hidden = await self._repo.get_chat_hidden(chat_id)
-        return item
+        return await self._repo.find_by_uid_with_hidden(chat_id, uid)
 
     async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
         parsed = parse_add_line(raw_args)
@@ -368,25 +409,29 @@ class WatchService:
         turned_live: list[WatchItem] = []
 
         async def _check_item(item: WatchItem) -> None:
-            async with sem:
-                res = await self._checker.check(item.uid)
-                now = datetime.now(UTC)
-                item.last_checked_at = now
-                if res.outcome == CheckOutcome.LIVE:
+            try:
+                async with sem:
+                    res = await self._checker.check(item.uid)
+                    if res.outcome != CheckOutcome.LIVE:
+                        return
                     verified = await self._checker.verify_live(item.uid)
                     if verified.outcome != CheckOutcome.LIVE:
                         return
-                    if self._lock is not None:
-                        locked = await self._lock.acquire_lock(
-                            f"notify:{item.id}",
-                            ttl_seconds=300,
-                        )
-                        if not locked:
-                            return
-                    item.status = WatchStatus.LIVE
-                    item.live_detected_at = now
-                    await self._repo.update(item, previous_status=WatchStatus.DIE)
-                    turned_live.append(item)
+                now = datetime.now(UTC)
+                item.last_checked_at = now
+                if self._lock is not None:
+                    locked = await self._lock.acquire_lock(
+                        f"notify:{item.id}",
+                        ttl_seconds=300,
+                    )
+                    if not locked:
+                        return
+                item.status = WatchStatus.LIVE
+                item.live_detected_at = now
+                await self._repo.update(item, previous_status=WatchStatus.DIE)
+                turned_live.append(item)
+            except Exception as exc:
+                logger.warning("recheck_item_error watch_id=%s error=%s", item.id, exc)
 
         await asyncio.gather(*(_check_item(i) for i in items))
         if turned_live:
@@ -396,15 +441,16 @@ class WatchService:
         return len(items), turned_live
 
     async def _require_owned(self, chat_id: int, watch_id: int) -> WatchItem:
-        item = await self._repo.get(watch_id)
+        item, is_hidden = await self._repo.get_with_hidden(chat_id, watch_id)
         if item is None or item.chat_id != chat_id:
             raise ValueError("Không tìm thấy kèo trong chat này.")
-        item.is_hidden = await self._repo.get_chat_hidden(chat_id)
+        item.is_hidden = is_hidden
         return item
 
     async def set_hidden(self, chat_id: int, watch_id: int, hidden: bool) -> WatchItem:
-        await self._repo.set_chat_hidden(chat_id, hidden)
-        item = await self._require_owned(chat_id, watch_id)
+        item = await self._repo.set_chat_hidden_and_get(chat_id, watch_id, hidden)
+        if item is None or item.chat_id != chat_id:
+            raise ValueError("Không tìm thấy kèo trong chat này.")
         item.is_hidden = hidden
         return item
 
@@ -472,6 +518,12 @@ class WatcherScanService:
             grouped.setdefault(item.uid, []).append(item)
 
         sem = asyncio.Semaphore(self._concurrency)
+        hidden_by_chat: dict[int, bool] = {}
+
+        async def _get_hidden(chat_id: int) -> bool:
+            if chat_id not in hidden_by_chat:
+                hidden_by_chat[chat_id] = await self._repo.get_chat_hidden(chat_id)
+            return hidden_by_chat[chat_id]
 
         async def _scan_uid(uid: str, uid_items: list[WatchItem]) -> int:
             try:
@@ -485,40 +537,40 @@ class WatcherScanService:
                     verified = await self._checker.verify_live(uid)
                     if verified.outcome != CheckOutcome.LIVE:
                         logger.info(
-                            "watcher_double_verify_rejected",
-                            uid=uid,
-                            watch_ids=[it.id for it in uid_items],
-                            second_outcome=verified.outcome.value,
+                            "watcher_double_verify_rejected uid=%s watch_ids=%s second_outcome=%s",
+                            uid,
+                            [it.id for it in uid_items],
+                            verified.outcome.value,
                         )
                         return 0
 
-                    now = datetime.now(UTC)
-                    count = 0
-                    for item in uid_items:
-                        lock_key = f"notify:{item.id}"
-                        locked = await self._lock.acquire_lock(lock_key, ttl_seconds=300)
-                        if not locked:
-                            continue
-                        item.last_checked_at = now
-                        item.status = WatchStatus.LIVE
-                        item.live_detected_at = now
-                        item.is_hidden = await self._repo.get_chat_hidden(item.chat_id)
-                        try:
-                            await self._notifier.notify_live(item)
-                        except Exception as exc:
-                            logger.warning(
-                                "watcher_notify_failed",
-                                watch_id=item.id,
-                                chat_id=item.chat_id,
-                                error=str(exc),
-                            )
-                            await self._lock.release_lock(lock_key)
-                            continue
-                        await self._repo.update(item, previous_status=WatchStatus.DIE)
-                        count += 1
-                    return count
+                now = datetime.now(UTC)
+                count = 0
+                for item in uid_items:
+                    lock_key = f"notify:{item.id}"
+                    locked = await self._lock.acquire_lock(lock_key, ttl_seconds=300)
+                    if not locked:
+                        continue
+                    item.last_checked_at = now
+                    item.status = WatchStatus.LIVE
+                    item.live_detected_at = now
+                    item.is_hidden = await _get_hidden(item.chat_id)
+                    try:
+                        await self._notifier.notify_live(item)
+                    except Exception as exc:
+                        logger.warning(
+                            "watcher_notify_failed watch_id=%s chat_id=%s error=%s",
+                            item.id,
+                            item.chat_id,
+                            exc,
+                        )
+                        await self._lock.release_lock(lock_key)
+                        continue
+                    await self._repo.update(item, previous_status=WatchStatus.DIE)
+                    count += 1
+                return count
             except Exception as exc:
-                logger.warning("watcher_scan_uid_error", uid=uid, error=str(exc))
+                logger.warning("watcher_scan_uid_error uid=%s error=%s", uid, exc)
                 return 0
 
         results = await asyncio.gather(
@@ -527,9 +579,9 @@ class WatcherScanService:
         notified = sum(results)
         if notified > 0:
             logger.info(
-                "watcher_scan_notified",
-                count=notified,
-                scanned=len(items),
-                unique_uids=len(grouped),
+                "watcher_scan_notified count=%s scanned=%s unique_uids=%s",
+                notified,
+                len(items),
+                len(grouped),
             )
         return notified
