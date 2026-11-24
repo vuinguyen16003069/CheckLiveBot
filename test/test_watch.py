@@ -466,17 +466,30 @@ async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> N
 
     sent_messages: list[MagicMock] = []
 
-    async def _fake_answer(text: str, **kwargs: object) -> MagicMock:
-        sent = MagicMock()
-        sent.text = text
-        sent.kwargs = kwargs
-        sent.delete = AsyncMock()
-        sent_messages.append(sent)
-        return sent
+    class _UnhashableSendMethod:
+        __hash__ = None  # type: ignore[assignment]
+
+        def __init__(self, text: str, kwargs: dict[str, object]) -> None:
+            self._text = text
+            self._kwargs = kwargs
+
+        def __await__(self) -> object:
+            async def _send() -> MagicMock:
+                sent = MagicMock()
+                sent.text = self._text
+                sent.kwargs = self._kwargs
+                sent.delete = AsyncMock()
+                sent_messages.append(sent)
+                return sent
+
+            return _send().__await__()
+
+    def _fake_answer(text: str, **kwargs: object) -> _UnhashableSendMethod:
+        return _UnhashableSendMethod(text, kwargs)
 
     message = MagicMock()
     message.chat.id = 100
-    message.answer = AsyncMock(side_effect=_fake_answer)
+    message.answer = MagicMock(side_effect=_fake_answer)
     state = MagicMock()
     state.clear = AsyncMock()
 

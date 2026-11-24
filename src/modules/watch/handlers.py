@@ -136,8 +136,11 @@ def create_watch_router(watch_service: WatchService) -> Router:
             await message.answer(format_watch_card(item), reply_markup=_back_keyboard(item))
             return
 
+        async def _attach_keyboard() -> Message:
+            return await message.answer("⚡", reply_markup=build_reply_keyboard())
+
         tmp, stats = await asyncio.gather(
-            message.answer("⚡", reply_markup=build_reply_keyboard()),
+            _attach_keyboard(),
             watch_service.get_stats(message.chat.id),
         )
         with contextlib.suppress(TelegramBadRequest):
