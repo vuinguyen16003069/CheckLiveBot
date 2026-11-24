@@ -131,7 +131,7 @@ class CurlCffiFacebookChecker:
         """Best-effort fast fetch of public Facebook name and avatar URL (streams only <head>)."""
         url = f"https://www.facebook.com/profile.php?id={uid}"
         kwargs: dict[str, Any] = {
-            "timeout": (self._connect_timeout, self._timeout),
+            "timeout": (4.0, max(6.0, self._timeout)),
             "allow_redirects": True,
             "stream": True,
             "headers": {
@@ -153,11 +153,7 @@ class CurlCffiFacebookChecker:
                 buf = bytearray()
                 async for chunk in response.aiter_content():
                     buf.extend(chunk)
-                    if (
-                        (b"og:title" in buf and b"og:image" in buf)
-                        or b"</head>" in buf
-                        or len(buf) >= 65536
-                    ):
+                    if b"</head>" in buf or len(buf) >= 131072:
                         break
                 body = bytes(buf).decode("utf-8", errors="ignore")
             else:
@@ -167,7 +163,7 @@ class CurlCffiFacebookChecker:
                 return None, None
             return parse_public_profile_html(body)
         except Exception as exc:
-            logger.debug("fb_profile_info_failed uid=%s error=%s", uid, exc)
+            logger.warning("fb_profile_info_failed uid=%s error=%s", uid, exc)
             return None, None
         finally:
             if response is not None:
