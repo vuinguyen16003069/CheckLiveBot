@@ -17,13 +17,22 @@ from src.core.ports import CheckOutcome, UidCheckResult
 logger = logging.getLogger(__name__)
 
 
+def _meta_content(body: str, prop: str) -> str | None:
+    for pattern in (
+        rf'<meta[^>]+property=["\']{prop}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{prop}["\']',
+    ):
+        match = re.search(pattern, body, re.IGNORECASE)
+        if match:
+            return html.unescape(match.group(1)).strip()
+    return None
+
+
 class _RetryableCheckError(Exception):
     pass
 
 
 class ProxyPool:
-    """Round-robin proxy pool with automatic short cooldown for failing/rate-limited proxies."""
-
     def __init__(
         self,
         proxies: Sequence[str] | None = None,
@@ -42,29 +51,26 @@ class ProxyPool:
         total = len(self._proxies)
         if total == 0:
             return None
+
         now = time.monotonic()
-        best_proxy: str | None = None
-        earliest_ready = float("inf")
-        for offset in range(total):
-            idx = (self._cursor + offset) % total
-            candidate = self._proxies[idx]
-            ready_at = self._cooldown_until.get(candidate, 0.0)
-            if ready_at <= now:
-                self._cursor = (idx + 1) % total
-                return candidate
-            if ready_at < earliest_ready:
-                earliest_ready = ready_at
-                best_proxy = candidate
-        if best_proxy is not None:
-            self._cursor = (self._proxies.index(best_proxy) + 1) % total
-        return best_proxy
+        order = [(self._cursor + offset) % total for offset in range(total)]
+
+        def ready_at(idx: int) -> float:
+            return self._cooldown_until.get(self._proxies[idx], 0.0)
+
+        chosen = next((idx for idx in order if ready_at(idx) <= now), None)
+        if chosen is None:
+            chosen = min(order, key=ready_at)
+
+        self._cursor = (chosen + 1) % total
+        return self._proxies[chosen]
 
     def report_failure(self, proxy: str | None) -> None:
         if not proxy:
             return
         failures = self._failures.get(proxy, 0) + 1
         self._failures[proxy] = failures
-        cooldown = min(self._base_cooldown * (2 ** (failures - 1)), self._max_cooldown)
+        cooldown = min(self._base_cooldown * 2 ** (failures - 1), self._max_cooldown)
         self._cooldown_until[proxy] = time.monotonic() + cooldown
 
     def report_success(self, proxy: str | None) -> None:
@@ -109,27 +115,18 @@ class CurlCffiFacebookChecker:
         await self.close()
 
     async def check(self, uid: str) -> UidCheckResult:
-        """Check UID with in-flight request coalescing (singleflight, zero stale cache)."""
         task = self._inflight.get(uid)
         if task is None:
             task = asyncio.create_task(self._check_direct(uid))
             self._inflight[uid] = task
-
-            def _cleanup(done_task: asyncio.Task[UidCheckResult]) -> None:
-                if self._inflight.get(uid) is done_task:
-                    self._inflight.pop(uid, None)
-
-            task.add_done_callback(_cleanup)
+            task.add_done_callback(lambda done: self._release(uid, done))
         return await asyncio.shield(task)
 
     async def verify_live(self, uid: str) -> UidCheckResult:
-        """Independent layer-2 verification bypassing singleflight."""
         await asyncio.sleep(self._verify_delay)
         return await self._check_direct(uid)
 
     async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
-        """Best-effort fast fetch of public Facebook name and avatar URL (streams only <head>)."""
-        url = f"https://www.facebook.com/profile.php?id={uid}"
         kwargs: dict[str, Any] = {
             "timeout": (4.0, max(6.0, self._timeout)),
             "allow_redirects": True,
@@ -145,32 +142,21 @@ class CurlCffiFacebookChecker:
         proxy = self._proxy_pool.next_proxy()
         if proxy:
             kwargs["proxy"] = proxy
+
         response: Any = None
         try:
-            response = await self._session.get(url, **kwargs)
-            iter_content = getattr(response, "aiter_content", None)
-            if callable(iter_content):
-                buf = bytearray()
-                async for chunk in response.aiter_content():
-                    buf.extend(chunk)
-                    if b"</head>" in buf or len(buf) >= 131072:
-                        break
-                body = bytes(buf).decode("utf-8", errors="ignore")
-            else:
-                raw_text = getattr(response, "text", "")
-                body = raw_text if isinstance(raw_text, str) else ""
-            if not body:
-                return None, None
-            return parse_public_profile_html(body)
+            response = await self._session.get(
+                f"https://www.facebook.com/profile.php?id={uid}", **kwargs
+            )
+            body = await self._read_head(response)
+            return parse_public_profile_html(body) if body else (None, None)
         except Exception as exc:
             logger.warning("fb_profile_info_failed uid=%s error=%s", uid, exc)
             return None, None
         finally:
-            if response is not None:
-                aclose = getattr(response, "aclose", None)
-                if callable(aclose):
-                    with contextlib.suppress(Exception):
-                        await response.aclose()
+            if response is not None and callable(getattr(response, "aclose", None)):
+                with contextlib.suppress(Exception):
+                    await response.aclose()
 
     async def close(self) -> None:
         pending = list(self._inflight.values())
@@ -181,6 +167,23 @@ class CurlCffiFacebookChecker:
             await asyncio.gather(*pending, return_exceptions=True)
         if self._owns_session:
             await self._session.close()
+
+    def _release(self, uid: str, task: asyncio.Task[UidCheckResult]) -> None:
+        if self._inflight.get(uid) is task:
+            del self._inflight[uid]
+
+    @staticmethod
+    async def _read_head(response: Any) -> str:
+        if not callable(getattr(response, "aiter_content", None)):
+            text = getattr(response, "text", "")
+            return text if isinstance(text, str) else ""
+
+        buf = bytearray()
+        async for chunk in response.aiter_content():
+            buf.extend(chunk)
+            if b"</head>" in buf or len(buf) >= 131072:
+                break
+        return buf.decode("utf-8", errors="ignore")
 
     async def _check_direct(self, uid: str) -> UidCheckResult:
         url = f"https://graph.facebook.com/{uid}/picture?type=normal&redirect=false"
@@ -245,24 +248,27 @@ def parse_graph_picture_payload(
     if not isinstance(payload, dict):
         return CheckOutcome.ERROR, f"unexpected_payload_http_{status_code}"
 
-    payload_dict = cast(dict[str, Any], payload)
-    if "error" in payload_dict:
-        err_raw = payload_dict.get("error")
+    body = cast(dict[str, Any], payload)
+
+    if "error" in body:
+        err_raw = body["error"]
         if isinstance(err_raw, dict):
-            err_dict = cast(dict[str, Any], err_raw)
-            code = err_dict.get("code")
-            if bool(err_dict.get("is_transient")) or (
+            error = cast(dict[str, Any], err_raw)
+            code: Any = error.get("code")
+            if error.get("is_transient") or (
                 type(code) is int and code in {1, 2, 4, 17, 32, 341, 613}
             ):
                 return CheckOutcome.ERROR, f"graph_transient_{code}"
         return CheckOutcome.DIE, "graph_error"
 
-    data_raw = payload_dict.get("data")
+    data_raw = body.get("data")
     if not isinstance(data_raw, dict):
         return CheckOutcome.DIE, f"no_data_http_{status_code}"
 
     data = cast(dict[str, Any], data_raw)
-    height, width, url = data.get("height"), data.get("width"), data.get("url")
+    height: Any = data.get("height")
+    width: Any = data.get("width")
+    url: Any = data.get("url")
     if not (
         type(height) is int
         and type(width) is int
@@ -273,9 +279,8 @@ def parse_graph_picture_payload(
     ):
         return CheckOutcome.DIE, "missing_avatar_dimensions"
 
-    url_lower = url.lower()
-    if data.get("is_silhouette") and any(
-        marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g")
+    if data.get("is_silhouette") and _contains_any(
+        url.lower(), ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g")
     ):
         return CheckOutcome.DIE, "silhouette_placeholder"
 
@@ -283,30 +288,23 @@ def parse_graph_picture_payload(
 
 
 def parse_public_profile_html(body: str) -> tuple[str | None, str | None]:
-    """Extract (fb_name, avatar_url) from public Facebook profile HTML metadata."""
-    name: str | None = None
-    og_title = re.search(
-        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
-        body,
-        re.IGNORECASE,
-    )
-    if og_title is None:
-        og_title = re.search(
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
-            body,
-            re.IGNORECASE,
-        )
-    if og_title:
-        candidate = html.unescape(og_title.group(1)).strip()
-    else:
-        title_m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
-        candidate = html.unescape(title_m.group(1)).strip() if title_m else ""
+    return _extract_name(body), _extract_avatar(body)
+
+
+def _contains_any(text: str, markers: Sequence[str]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _extract_name(body: str) -> str | None:
+    candidate = _meta_content(body, "og:title")
+    if candidate is None:
+        title = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        candidate = html.unescape(title.group(1)).strip() if title else ""
         for sep in (" | Facebook", " - Facebook", " • Facebook", " (@"):
             if sep in candidate:
                 candidate = candidate.split(sep, 1)[0].strip()
 
-    lowered = candidate.lower()
-    if candidate and lowered not in {
+    if candidate and candidate.lower() not in {
         "facebook",
         "log in or sign up",
         "log into facebook",
@@ -315,27 +313,19 @@ def parse_public_profile_html(body: str) -> tuple[str | None, str | None]:
         "page not found",
         "content not found",
     }:
-        name = candidate
+        return candidate
+    return None
 
-    avatar_url: str | None = None
-    og_image = re.search(
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-        body,
-        re.IGNORECASE,
-    )
-    if og_image is None:
-        og_image = re.search(
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-            body,
-            re.IGNORECASE,
+
+def _extract_avatar(body: str) -> str | None:
+    image = _meta_content(body, "og:image")
+    if (
+        image
+        and image.startswith(("http://", "https://"))
+        and not _contains_any(
+            image.lower(),
+            ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g", "fb_icon"),
         )
-    if og_image:
-        raw_img = html.unescape(og_image.group(1)).strip()
-        img_lower = raw_img.lower()
-        if raw_img.startswith(("http://", "https://")) and not any(
-            marker in img_lower
-            for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "fb_icon", "c5yt7c_3z_g")
-        ):
-            avatar_url = raw_img
-
-    return name, avatar_url
+    ):
+        return image
+    return None
