@@ -47,3 +47,6 @@ class RedisLock:
             ex=ttl_seconds,
         )
         return bool(acquired)
+
+    async def release_lock(self, key: str) -> None:
+        await self._redis.delete(f"{self._prefix}:lock:{key}")

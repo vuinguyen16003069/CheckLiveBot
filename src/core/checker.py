@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Sequence
 from itertools import cycle
 from typing import Any, cast
@@ -66,7 +67,8 @@ class CurlCffiFacebookChecker:
             except _RetryableCheckError as exc:
                 last_error = exc
                 if attempt + 1 < self._max_retries:
-                    await asyncio.sleep(min(0.2 * 2**attempt, 1.0))
+                    backoff = min(0.2 * 2**attempt, 1.0)
+                    await asyncio.sleep(backoff * random.uniform(0.5, 1.0))  # noqa: S311
             except Exception as exc:
                 logger.warning("fb_check_unexpected_error", uid=uid, error=str(exc))
                 return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(exc))

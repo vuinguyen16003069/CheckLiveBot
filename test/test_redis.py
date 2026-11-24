@@ -287,11 +287,10 @@ async def run_interactive_menu(r: Redis, prefix: str) -> None:
         print(f" {C_WHITE}1. Xem dung lượng & thống kê DB (Capacity & Stats){C_RESET}")
         print(f" {C_GREEN}2. Xuất toàn bộ Redis ra file .json (Export DB){C_RESET}")
         print(f" {C_WHITE}3. Xem toàn bộ JSON Dump (Print JSON Snapshot){C_RESET}")
-        print(f" {C_YELLOW}4. Xóa cache check UID ({prefix}:check_cache:*){C_RESET}")
-        print(f" {C_RED}5. Xóa key theo tên (Delete key by name){C_RESET}")
-        print(f" {C_RED}6. Xóa toàn bộ DB (Flush entire DB){C_RESET}")
+        print(f" {C_RED}4. Xóa key theo tên (Delete key by name){C_RESET}")
+        print(f" {C_RED}5. Xóa toàn bộ DB (Flush entire DB){C_RESET}")
 
-        start_opt = 7
+        start_opt = 6
         for idx, grp in enumerate(group_list):
             print(
                 f" {C_CYAN}{start_opt + idx}. Xem nhóm: {grp}:* ({len(groups[grp])} keys){C_RESET}"
@@ -320,8 +319,6 @@ async def run_interactive_menu(r: Redis, prefix: str) -> None:
         elif choice == "3":
             await show_json_dump(r)
         elif choice == "4":
-            await delete_group_keys(r, f"{prefix}:check_cache")
-        elif choice == "5":
             k = (await ainput(f"{C_CYAN}Nhập tên key cần xóa: {C_RESET}")).strip()
             if k:
                 conf = (
@@ -331,7 +328,7 @@ async def run_interactive_menu(r: Redis, prefix: str) -> None:
                 )
                 if conf == "y":
                     await delete_key_by_name(r, k)
-        elif choice == "6":
+        elif choice == "5":
             conf = (
                 await ainput(
                     f"{C_RED}⚠ BẠN CHẮC CHẮN MUỐN XÓA TOÀN BỘ DB? (gõ 'flush' để xác nhận): {C_RESET}"
@@ -355,7 +352,6 @@ async def main() -> None:
     parser.add_argument("--info", action="store_true", help="Xem dung lượng và thống kê DB")
     parser.add_argument("--dump", action="store_true", help="Hiển thị JSON Dump toàn bộ Redis")
     parser.add_argument("--export", nargs="?", const="default", help="Xuất Redis ra file JSON")
-    parser.add_argument("--clear-cache", action="store_true", help="Xóa toàn bộ check_cache:*")
     parser.add_argument("--pattern", default="*", help="Pattern filter khi dump/export")
     args = parser.parse_args()
 
@@ -369,8 +365,6 @@ async def main() -> None:
         elif args.export:
             fname = None if args.export == "default" else args.export
             await export_db_to_json(r, fname, pattern=args.pattern)
-        elif args.clear_cache:
-            await delete_group_keys(r, f"{settings.redis_key_prefix}:check_cache")
         else:
             await run_interactive_menu(r, settings.redis_key_prefix)
     finally:

@@ -487,6 +487,7 @@ async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> N
     )
 
     assert len(sent_messages) == 2
+    assert sent_messages[0].text.strip(" \t\n\r\u200b\u200c\u200d\ufeff") != ""
     reply_kb = sent_messages[0].kwargs.get("reply_markup")
     assert isinstance(reply_kb, ReplyKeyboardMarkup)
     assert reply_kb.is_persistent is True
@@ -499,4 +500,86 @@ async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> N
     assert sum(len(row) for row in dashboard_kb.inline_keyboard) == 4
     assert "Đang chờ: <b>0</b>" in sent_messages[1].text
 
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_watcher_isolates_transient_notify_failure_and_recheck_uses_lock() -> None:
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    lock = RedisLock(redis, prefix="test")
+    repo = RedisWatchRepository(redis, prefix="test")
+    checker = _StubChecker({"100020": CheckOutcome.DIE, "100021": CheckOutcome.DIE})
+    svc = WatchService(repo=repo, checker=checker, lock=lock)
+
+    w_fail = await svc.add_watch(chat_id=100, user_id=1, raw_args="100020 | Chat lỗi mạng | 10k")
+    w_ok = await svc.add_watch(chat_id=200, user_id=2, raw_args="100020 | Chat ổn | 20k")
+    w_locked = await svc.add_watch(chat_id=300, user_id=3, raw_args="100021 | Đang bị khóa | 30k")
+
+    class _FlakyNotifier:
+        def __init__(self) -> None:
+            self.fail_chat_100 = True
+            self.notified: list[int] = []
+
+        async def notify_live(self, item: WatchItem) -> None:
+            if item.chat_id == 100 and self.fail_chat_100:
+                raise RuntimeError("transient telegram timeout")
+            self.notified.append(item.chat_id)
+
+    notifier = _FlakyNotifier()
+    scanner = WatcherScanService(repo=repo, checker=checker, lock=lock, notifier=notifier)
+
+    checker.mapping["100020"] = CheckOutcome.LIVE
+    checker.verify_mapping["100020"] = (CheckOutcome.LIVE, "OK")
+
+    # 1st scan: chat 200 succeeds while chat 100 fails transiently -> chat 100 stays DIE & lock released
+    assert await scanner.scan_once() == 1
+    assert notifier.notified == [200]
+    w_fail_after = await repo.get(w_fail.id)
+    w_ok_after = await repo.get(w_ok.id)
+    assert w_fail_after is not None
+    assert w_fail_after.status == WatchStatus.DIE
+    assert w_ok_after is not None
+    assert w_ok_after.status == WatchStatus.LIVE
+
+    # 2nd scan: transient issue resolved -> chat 100 is notified without losing the alert
+    notifier.fail_chat_100 = False
+    assert await scanner.scan_once() == 1
+    assert notifier.notified == [200, 100]
+
+    # recheck_chat respects shared RedisLock so it never duplicates a LIVE alert
+    checker.mapping["100021"] = CheckOutcome.LIVE
+    checker.verify_mapping["100021"] = (CheckOutcome.LIVE, "OK")
+    assert await lock.acquire_lock(f"notify:{w_locked.id}", ttl_seconds=60) is True
+    scanned, turned_live = await svc.recheck_chat(300)
+    assert (scanned, turned_live) == (1, [])
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_lookup_filter_ignores_plain_chat_and_multiline() -> None:
+    from unittest.mock import MagicMock
+
+    from src.modules.watch.handlers import create_watch_router
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    svc = WatchService(repo=RedisWatchRepository(redis, prefix="test"), checker=_StubChecker({}))
+    router = create_watch_router(svc)
+    handler = next(
+        h for h in router.message.handlers if h.callback.__name__ == "handle_list_lookup"
+    )
+    assert handler.filters is not None
+    text_filters = handler.filters[1:]
+
+    async def _matches(text: str) -> bool:
+        msg = MagicMock()
+        msg.text = text
+        for flt in text_filters:
+            if not await flt.call(msg):
+                return False
+        return True
+
+    assert await _matches("100012345678901") is True
+    assert await _matches("https://fb.com/profile.php?id=100012345678901") is True
+    assert await _matches("xin chào mọi người") is False
+    assert await _matches("10001\n10002") is False
     await redis.aclose()

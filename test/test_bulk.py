@@ -101,11 +101,11 @@ def test_extract_uids_deduplicates_caps_and_formats() -> None:
     assert len(uids) == 10000
     assert skipped == 3
 
-    # Embedded numeric token extraction + max_uids cap
-    mixed = "\n\nuser 100011111111111 note\n100022222222222\n100033333333333\n"
+    # Embedded numeric token extraction ignores leading-zero tokens + respects max_uids cap
+    mixed = "\n\n00000\n012345\nuser 100011111111111 note\n100022222222222\n100033333333333\n"
     capped, cap_skipped = extract_uids_from_text(mixed, max_uids=2)
     assert capped == ["100011111111111", "100022222222222"]
-    assert cap_skipped == 0
+    assert cap_skipped == 2
 
     # Progress bar boundary clamping
     assert render_progress_bar(0, 0, width=4) == "[░░░░] 0%"
@@ -222,7 +222,8 @@ async def test_bulk_check_service_runs_guards_and_closes_cleanly() -> None:
     assert notifier.results[0][1] == ["100003"]
     assert notifier.results[0][2] == ["100004"]
 
-    # Unexpected failure inside runner must still release chat busy guard
+    # Unexpected failure inside runner must still release chat busy guard & report error
+    failing_notifier = _StubBulkNotifier()
     failing_svc = BulkCheckService(
         checker=_StubChecker({}, fail_uid="100001"),
         concurrency=2,
@@ -231,20 +232,43 @@ async def test_bulk_check_service_runs_guards_and_closes_cleanly() -> None:
         chat_id=999,
         text="100001\n100002\n",
         status_message_id=80,
-        notifier=_StubBulkNotifier(),
+        notifier=failing_notifier,
     )
     await asyncio.sleep(0.05)
     assert failing_svc.is_chat_busy(999) is False
+    assert any("gặp sự cố" in msg for msg in failing_notifier.progress_updates)
 
-    # close() cancels slow in-flight jobs cleanly
+    # cancel_bulk_job stops in-flight job cleanly and releases chat busy guard
     slow_svc = BulkCheckService(checker=_StubChecker({}, delay=5.0), concurrency=2)
-    slow_svc.start_bulk_text(
+    slow_job_id, _, _ = slow_svc.start_bulk_text(
         chat_id=888,
         text="100001\n100002\n",
         status_message_id=81,
         notifier=_StubBulkNotifier(),
     )
     assert slow_svc.is_chat_busy(888) is True
-    await slow_svc.close()
+    assert slow_svc.cancel_bulk_job(888, "wrong-id") is False
+    assert slow_svc.cancel_bulk_job(888, slow_job_id) is True
     assert slow_svc.is_chat_busy(888) is False
+    assert slow_svc.cancel_bulk_job(888, slow_job_id) is False
+    await slow_svc.close()
     await svc.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_bulk_notifier_respects_retry_after_cooldown() -> None:
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import EditMessageText
+
+    bot = AsyncMock(spec=Bot)
+    bot.edit_message_text.side_effect = TelegramRetryAfter(
+        method=EditMessageText(chat_id=10, message_id=20, text="p"),
+        message="Too Many Requests",
+        retry_after=30,
+    )
+    notifier = TelegramBulkNotifier(bot, job_id="job42")
+
+    await notifier.update_progress(10, 20, "progress 1")
+    await notifier.update_progress(10, 20, "progress 2")
+    # Second call skipped during flood-wait cooldown
+    assert bot.edit_message_text.await_count == 1

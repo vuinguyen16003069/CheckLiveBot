@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
+import time
 from collections.abc import Sequence
 
 import structlog
@@ -23,12 +25,11 @@ from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import (
     build_combined_result_file,
     extract_uid,
-    extract_uids_from_text,
     format_bulk_progress,
     format_single_check,
 )
 from src.modules.bulk.service import BulkCheckService
-from src.modules.watch.ui import QuickWatchCallback
+from src.modules.watch.ui import ListLookupStates, QuickWatchCallback
 
 logger = structlog.get_logger(__name__)
 
@@ -37,18 +38,42 @@ class RecheckSingleCallback(CallbackData, prefix="rc"):
     uid: str
 
 
+class CancelBulkCallback(CallbackData, prefix="cb"):
+    job_id: str
+
+
+def build_bulk_progress_markup(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛑 Dừng check",
+                    callback_data=CancelBulkCallback(job_id=job_id).pack(),
+                )
+            ]
+        ]
+    )
+
+
 class TelegramBulkNotifier:
-    def __init__(self, bot: Bot) -> None:
+    def __init__(self, bot: Bot, *, job_id: str | None = None) -> None:
         self._bot = bot
+        self._job_id = job_id
+        self._retry_until = 0.0
 
     async def update_progress(self, chat_id: int, message_id: int, text: str) -> None:
+        if time.monotonic() < self._retry_until:
+            return
+        reply_markup = build_bulk_progress_markup(self._job_id) if self._job_id else None
         try:
             await self._bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
                 text=text,
+                reply_markup=reply_markup,
             )
         except TelegramRetryAfter as exc:
+            self._retry_until = time.monotonic() + float(exc.retry_after)
             logger.warning("telegram_progress_rate_limited", retry_after=exc.retry_after)
         except TelegramBadRequest:
             pass
@@ -75,7 +100,15 @@ class TelegramBulkNotifier:
             return
 
         doc = BufferedInputFile(content, filename=filename)
-        await self._bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+        try:
+            await self._bot.send_document(chat_id=chat_id, document=doc, caption=caption)
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(min(float(exc.retry_after), 5.0))
+            await self._bot.send_document(
+                chat_id=chat_id,
+                document=BufferedInputFile(content, filename=filename),
+                caption=caption,
+            )
 
 
 def build_single_check_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup:
@@ -135,6 +168,28 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             )
         await query.answer(f"🔄 Kết quả mới nhất: {outcome.value}")
 
+    @router.callback_query(CancelBulkCallback.filter())
+    async def cb_cancel_bulk(
+        query: CallbackQuery,
+        callback_data: CancelBulkCallback,
+    ) -> None:
+        msg = query.message
+        if not isinstance(msg, Message):
+            await query.answer()
+            return
+        cancelled = bulk_service.cancel_bulk_job(msg.chat.id, callback_data.job_id)
+        if cancelled:
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_text(
+                    f"🛑 Đã dừng phiên kiểm tra hàng loạt (<code>#{callback_data.job_id}</code>).",
+                    reply_markup=None,
+                )
+            await query.answer("🛑 Đã dừng kiểm tra.")
+        else:
+            with contextlib.suppress(TelegramBadRequest):
+                await msg.edit_reply_markup(reply_markup=None)
+            await query.answer("Phiên kiểm tra đã kết thúc.")
+
     @router.message(F.document)
     async def handle_txt_document(message: Message, bot: Bot, state: FSMContext) -> None:
         document = message.document
@@ -155,8 +210,12 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         text = buf.getvalue().decode("utf-8", errors="ignore")
         await _start_bulk(message, bulk_service, text)
 
-    @router.message(StateFilter(None), F.text, ~F.text.startswith("/"))
-    async def handle_smart_plain_text(message: Message) -> None:
+    @router.message(
+        StateFilter(None, ListLookupStates.waiting_uid),
+        F.text,
+        ~F.text.startswith("/"),
+    )
+    async def handle_smart_plain_text(message: Message, state: FSMContext) -> None:
         """Paste 1 UID/FB link to check immediately, or 2+ UIDs to bulk check."""
         text = (message.text or "").strip()
         if not text:
@@ -166,11 +225,16 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             await _reply_single_check(message, bulk_service, single)
             return
         if "\n" in text:
-            uids, _ = extract_uids_from_text(text, max_uids=50000)
+            try:
+                job_id, uids, _ = bulk_service.prepare_bulk_text(text)
+            except ValueError:
+                return
             if len(uids) == 1:
                 await _reply_single_check(message, bulk_service, uids[0])
             elif len(uids) >= 2:
-                await _start_bulk(message, bulk_service, text)
+                if await state.get_state() is not None:
+                    await state.clear()
+                await _start_bulk_prepared(message, bulk_service, job_id, uids)
 
     return router
 
@@ -205,6 +269,20 @@ async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: st
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
+    await _start_bulk_prepared(message, bulk_service, job_id, uids)
+
+
+async def _start_bulk_prepared(
+    message: Message,
+    bulk_service: BulkCheckService,
+    job_id: str,
+    uids: Sequence[str],
+) -> None:
+    if message.bot is None:
+        return
+    if bulk_service.is_chat_busy(message.chat.id):
+        await message.answer("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
+        return
 
     status_msg = await message.answer(
         format_bulk_progress(
@@ -214,12 +292,18 @@ async def _start_bulk(message: Message, bulk_service: BulkCheckService, text: st
             live=0,
             die=0,
             error=0,
+        ),
+        reply_markup=build_bulk_progress_markup(job_id),
+    )
+    try:
+        bulk_service.start_bulk_uids(
+            job_id=job_id,
+            chat_id=message.chat.id,
+            status_message_id=status_msg.message_id,
+            uids=uids,
+            notifier=TelegramBulkNotifier(message.bot, job_id=job_id),
         )
-    )
-    bulk_service.start_bulk_uids(
-        job_id=job_id,
-        chat_id=message.chat.id,
-        status_message_id=status_msg.message_id,
-        uids=uids,
-        notifier=TelegramBulkNotifier(message.bot),
-    )
+    except ValueError as exc:
+        with contextlib.suppress(TelegramBadRequest):
+            await status_msg.delete()
+        await message.answer(str(exc))

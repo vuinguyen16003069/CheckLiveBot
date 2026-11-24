@@ -232,6 +232,8 @@ async def test_redis_lock_and_throttling_middleware(monkeypatch: pytest.MonkeyPa
 
     assert await lock.acquire_lock("notify:1", 60) is True
     assert await lock.acquire_lock("notify:1", 60) is False
+    await lock.release_lock("notify:1")
+    assert await lock.acquire_lock("notify:1", 60) is True
 
     # Unlimited mode (limit=0)
     unlimited = ThrottlingMiddleware(limit_per_minute=0)

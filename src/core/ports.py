@@ -29,6 +29,7 @@ class FacebookCheckerPort(Protocol):
 
 class LockPort(Protocol):
     async def acquire_lock(self, key: str, ttl_seconds: int) -> bool: ...
+    async def release_lock(self, key: str) -> None: ...
 
 
 class BulkNotifierPort(Protocol):

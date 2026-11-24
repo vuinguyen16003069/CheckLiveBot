@@ -20,6 +20,4 @@ COPY --from=builder /app/.venv /app/.venv
 COPY main.py ./
 COPY src ./src
 
-EXPOSE 8080
-
 CMD ["python", "main.py"]

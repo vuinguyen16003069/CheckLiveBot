@@ -270,11 +270,13 @@ class WatchService:
         *,
         repo: RedisWatchRepository,
         checker: FacebookCheckerPort,
+        lock: LockPort | None = None,
         max_active_per_chat: int = 100,
         concurrency: int = 20,
     ) -> None:
         self._repo = repo
         self._checker = checker
+        self._lock = lock
         self._max_active_per_chat = max_active_per_chat
         self._concurrency = max(1, concurrency)
 
@@ -374,6 +376,13 @@ class WatchService:
                     verified = await self._checker.verify_live(item.uid)
                     if verified.outcome != CheckOutcome.LIVE:
                         return
+                    if self._lock is not None:
+                        locked = await self._lock.acquire_lock(
+                            f"notify:{item.id}",
+                            ttl_seconds=300,
+                        )
+                        if not locked:
+                            return
                     item.status = WatchStatus.LIVE
                     item.live_detected_at = now
                     await self._repo.update(item, previous_status=WatchStatus.DIE)
@@ -465,37 +474,52 @@ class WatcherScanService:
         sem = asyncio.Semaphore(self._concurrency)
 
         async def _scan_uid(uid: str, uid_items: list[WatchItem]) -> int:
-            async with sem:
-                res = await self._checker.check(uid)
-                if res.outcome != CheckOutcome.LIVE:
-                    # Skip redundant Redis writes when item is still DIE or ERROR
-                    return 0
+            try:
+                async with sem:
+                    res = await self._checker.check(uid)
+                    if res.outcome != CheckOutcome.LIVE:
+                        # Skip redundant Redis writes when item is still DIE or ERROR
+                        return 0
 
-                # Layer-2 double verification to guarantee 0% false LIVE alerts
-                verified = await self._checker.verify_live(uid)
-                if verified.outcome != CheckOutcome.LIVE:
-                    logger.info(
-                        "watcher_double_verify_rejected",
-                        uid=uid,
-                        watch_ids=[it.id for it in uid_items],
-                        second_outcome=verified.outcome.value,
-                    )
-                    return 0
+                    # Layer-2 double verification to guarantee 0% false LIVE alerts
+                    verified = await self._checker.verify_live(uid)
+                    if verified.outcome != CheckOutcome.LIVE:
+                        logger.info(
+                            "watcher_double_verify_rejected",
+                            uid=uid,
+                            watch_ids=[it.id for it in uid_items],
+                            second_outcome=verified.outcome.value,
+                        )
+                        return 0
 
-                now = datetime.now(UTC)
-                count = 0
-                for item in uid_items:
-                    locked = await self._lock.acquire_lock(f"notify:{item.id}", ttl_seconds=300)
-                    if not locked:
-                        continue
-                    item.last_checked_at = now
-                    item.status = WatchStatus.LIVE
-                    item.live_detected_at = now
-                    await self._repo.update(item, previous_status=WatchStatus.DIE)
-                    item.is_hidden = await self._repo.get_chat_hidden(item.chat_id)
-                    await self._notifier.notify_live(item)
-                    count += 1
-                return count
+                    now = datetime.now(UTC)
+                    count = 0
+                    for item in uid_items:
+                        lock_key = f"notify:{item.id}"
+                        locked = await self._lock.acquire_lock(lock_key, ttl_seconds=300)
+                        if not locked:
+                            continue
+                        item.last_checked_at = now
+                        item.status = WatchStatus.LIVE
+                        item.live_detected_at = now
+                        item.is_hidden = await self._repo.get_chat_hidden(item.chat_id)
+                        try:
+                            await self._notifier.notify_live(item)
+                        except Exception as exc:
+                            logger.warning(
+                                "watcher_notify_failed",
+                                watch_id=item.id,
+                                chat_id=item.chat_id,
+                                error=str(exc),
+                            )
+                            await self._lock.release_lock(lock_key)
+                            continue
+                        await self._repo.update(item, previous_status=WatchStatus.DIE)
+                        count += 1
+                    return count
+            except Exception as exc:
+                logger.warning("watcher_scan_uid_error", uid=uid, error=str(exc))
+                return 0
 
         results = await asyncio.gather(
             *(_scan_uid(uid, uid_items) for uid, uid_items in grouped.items())

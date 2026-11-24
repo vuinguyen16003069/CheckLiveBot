@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import uuid
 from collections.abc import Sequence
@@ -40,10 +41,26 @@ class BulkCheckService:
         self._max_bulk_uids = max_bulk_uids
         self._progress_interval = max(0.5, progress_interval_seconds)
         self._tasks: set[asyncio.Task[Any]] = set()
-        self._active_chats: set[int] = set()
+        self._chat_jobs: dict[int, tuple[str, asyncio.Task[Any]]] = {}
+
+    @property
+    def max_bulk_uids(self) -> int:
+        return self._max_bulk_uids
 
     def is_chat_busy(self, chat_id: int) -> bool:
-        return chat_id in self._active_chats
+        return chat_id in self._chat_jobs
+
+    def cancel_bulk_job(self, chat_id: int, job_id: str | None = None) -> bool:
+        entry = self._chat_jobs.get(chat_id)
+        if entry is None:
+            return False
+        active_job_id, task = entry
+        if job_id is not None and active_job_id != job_id:
+            return False
+        self._chat_jobs.pop(chat_id, None)
+        task.cancel()
+        logger.info("bulk_job_cancel_requested", job_id=active_job_id, chat_id=chat_id)
+        return True
 
     async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
         uid = extract_uid(raw_uid)
@@ -68,9 +85,13 @@ class BulkCheckService:
         uids: Sequence[str],
         notifier: BulkNotifierPort,
     ) -> None:
-        if chat_id in self._active_chats:
+        if chat_id in self._chat_jobs:
             raise ValueError("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
-        self._active_chats.add(chat_id)
+
+        def _release_chat() -> None:
+            current = self._chat_jobs.get(chat_id)
+            if current is not None and current[0] == job_id:
+                self._chat_jobs.pop(chat_id, None)
 
         async def _runner() -> None:
             try:
@@ -81,15 +102,25 @@ class BulkCheckService:
                     uids=uids,
                     notifier=notifier,
                 )
+            except asyncio.CancelledError:
+                logger.info("bulk_job_cancelled", job_id=job_id, chat_id=chat_id)
+                raise
             except Exception as exc:
                 logger.exception("bulk_job_failed", job_id=job_id, error=str(exc))
+                with contextlib.suppress(Exception):
+                    await notifier.update_progress(
+                        chat_id,
+                        status_message_id,
+                        f"⚠️ Phiên kiểm tra <code>#{job_id}</code> gặp sự cố, vui lòng thử lại.",
+                    )
             finally:
-                self._active_chats.discard(chat_id)
+                _release_chat()
 
         task = asyncio.create_task(_runner(), name=f"bulk:{job_id}")
+        self._chat_jobs[chat_id] = (job_id, task)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(lambda _t: self._active_chats.discard(chat_id))
+        task.add_done_callback(lambda _t: _release_chat())
         logger.info("bulk_job_started", job_id=job_id, chat_id=chat_id, total=len(uids))
 
     def start_bulk_text(
@@ -215,4 +246,4 @@ class BulkCheckService:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
-        self._active_chats.clear()
+        self._chat_jobs.clear()

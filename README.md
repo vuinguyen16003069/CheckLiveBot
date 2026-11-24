@@ -51,31 +51,34 @@ Telegram Bot kiểm tra trạng thái **LIVE / DIE UID Facebook** tốc độ ca
 Mã nguồn tách rõ **hạ tầng lõi dùng chung (`src/core/`)** và **các feature module độc lập (`src/modules/`)**. Mọi module đều tuân thủ chiều phụ thuộc một chiều: **`handlers → service → domain / core.ports`**.
 
 ```text
-e:\CheckLiveBot/
-├── main.py                         # Entrypoint duy nhất: uvloop + Bot (Polling/Webhook + /health) + ARQ Worker inline
+CheckLiveBot/
+├── main.py                         # Entrypoint duy nhất: uvloop + Settings + structlog + run_bot()
 ├── src/
 │   ├── core/                       # Hạ tầng lõi & Port dùng chung
-│   │   ├── config.py               # Settings (.env, ưu tiên REDIS_TLS_URL) + structlog
-│   │   ├── ports.py                # CheckOutcome (LIVE/DIE/ERROR) & Protocols
-│   │   ├── redis.py                # Redis RAM (TLS rediss://), Cache TTL, Lock, RateLimit & ARQ Queue
-│   │   └── checker.py              # curl_cffi (Chrome JA3/JA4) + ProxyPool + tenacity retry
+│   │   ├── config.py               # Settings (.env) + structlog
+│   │   ├── ports.py                # CheckOutcome (LIVE/DIE/ERROR), UidCheckResult & Protocols
+│   │   ├── redis.py                # Redis RAM (tự động TLS rediss:// cho Upstash) & RedisLock
+│   │   ├── checker.py              # curl_cffi (Chrome JA3/JA4) + ProxyPool + retry backoff jitter
+│   │   ├── middleware.py           # ThrottlingMiddleware (in-memory sliding-window rate limiter)
+│   │   └── runtime.py              # Khởi chạy aiogram Dispatcher polling + vòng quét watcher nền
 │   └── modules/                    # Feature modules độc lập
 │       ├── watch/                  # Module 1: Theo dõi kèo DIE -> LIVE
-│       │   ├── domain.py           # WatchItem, WatchStatus, WatchEvent, WatchStats, format HTML
+│       │   ├── domain.py           # WatchItem, WatchStats, parser & format HTML card/list
 │       │   ├── service.py          # WatchService, WatcherScanService & RedisWatchRepository
-│       │   └── handlers.py         # /start, /help, /add, /addlist, /recheck, /list, /stats, /history & callbacks
-│       └── bulk/                   # Module 2: Check nhanh & Bulk file .txt (10k-50k UID)
+│       │   ├── ui.py               # Reply/Inline keyboards, Wizard FSM & CallbackData
+│       │   └── handlers.py         # /start, /help, /add, /list, /stats, /cancel & callbacks
+│       └── bulk/                   # Module 2: Check nhanh & Bulk file .txt (tối đa 50k UID)
 │           ├── domain.py           # BulkSummary, tách/deduplicate UID/URL FB, progress bar & xuất file
-│           ├── service.py          # BulkCheckService (ARQ enqueue, MGET cache, Semaphore, throttle 2.5s)
-│           └── handlers.py         # /check, /bulk, nhận trực tiếp file .txt & TelegramBulkNotifier
-├── tests/
-│   ├── test_core.py                # Config, curl_cffi + tenacity + ProxyPool, Redis cache/lock/rate-limit
-│   ├── test_watch.py               # WatchService, cô lập chat_id, phân trang ZSET, cron DIE->LIVE
-│   ├── test_bulk.py                # Parse 10k+ UID, BulkCheckService (cache hit + progress + file)
-│   └── test_web.py                 # aiohttp Webhook secret token & GET /health
+│           ├── service.py          # BulkCheckService (worker pool RAM, hủy job, guard theo chat)
+│           └── handlers.py         # /check, smart plain-text, nhận file .txt & TelegramBulkNotifier
+├── test/
+│   ├── test_core.py                # Config, curl_cffi + ProxyPool, RedisLock, middleware & watcher loop
+│   ├── test_watch.py               # Watch domain/UI/service, cô lập lỗi, lock & TTL 90 ngày
+│   ├── test_bulk.py                # Parse 10k+ UID, BulkCheckService, hủy job & flood cooldown
+│   └── test_redis.py               # Công cụ CLI quản lý/sao lưu Redis + unit test offline
 ├── Dockerfile                      # Multi-stage build siêu gọn bằng uv
-├── docker-compose.yml              # bot (kèm inline worker) + redis (AOF) + profile scale worker
-├── Procfile                        # Heroku: web (python main.py) & worker (arq main.WorkerSettings)
+├── docker-compose.yml              # bot + redis 7 (AOF)
+├── Procfile                        # Heroku: worker (python main.py)
 ├── .python-version                 # Ghim Python 3.12
 ├── .env.example
 └── pyproject.toml                  # uv, ruff, pyright, pytest

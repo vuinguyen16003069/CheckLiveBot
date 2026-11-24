@@ -57,7 +57,11 @@ async def run_bot(settings: Settings) -> None:
         raise RuntimeError("BOT_TOKEN is required. Copy .env.example to .env and set BOT_TOKEN.")
 
     redis = create_redis_client(settings.redis_url)
-    await asyncio.wait_for(redis.ping(), timeout=10.0)
+    try:
+        await asyncio.wait_for(redis.ping(), timeout=10.0)
+    except Exception:
+        await redis.aclose()
+        raise
     logger.info("redis_connected")
 
     checker = CurlCffiFacebookChecker(
@@ -80,6 +84,7 @@ async def run_bot(settings: Settings) -> None:
     watch_service = WatchService(
         repo=repo,
         checker=checker,
+        lock=lock,
         max_active_per_chat=settings.max_active_watches_per_chat,
         concurrency=settings.concurrency,
     )

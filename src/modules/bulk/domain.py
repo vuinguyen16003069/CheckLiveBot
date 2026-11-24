@@ -40,7 +40,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = re.search(r"\b(\d{5,20})\b", stripped)
+            token_match = re.search(r"\b([1-9]\d{4,19})\b", stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1
