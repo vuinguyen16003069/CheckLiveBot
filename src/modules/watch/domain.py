@@ -199,7 +199,7 @@ def format_watch_list(
         price_display = html.escape(_format_price(item.price))
         faq_part = f" | ⚠️ {html.escape(item.faq)}" if item.faq else ""
         rows.append(
-            f"{badge} <b>#{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
+            f"{badge} <b>{item.id}.</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
         )
     if bot_username:
         rows.append("\n<i>⇨ Chạm vào UID để xem chi tiết kèo hoặc nhắn UID / link để tra cứu.</i>")
