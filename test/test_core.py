@@ -13,6 +13,7 @@ from src.core.checker import (
     CurlCffiFacebookChecker,
     ProxyPool,
     parse_graph_picture_payload,
+    parse_public_profile_html,
 )
 from src.core.config import Settings, setup_logging
 from src.core.middleware import ThrottlingMiddleware
@@ -359,3 +360,23 @@ async def test_proxy_pool_cooldown_and_singleflight_and_transient_retry() -> Non
     verified = await checker_sf.verify_live("100077")
     assert verified.outcome == CheckOutcome.LIVE
     assert slow_session.calls == 2
+
+
+def test_parse_public_profile_html_extracts_name_and_avatar() -> None:
+    html_ok = (
+        "<html><head><title>Vui Nguyễn (@vuinguyen.2026) • Facebook</title>"
+        '<meta property="og:title" content="Vui Nguyễn" />'
+        '<meta property="og:image" content="https://scontent.xx.fbcdn.net/v/avt.jpg" />'
+        "</head></html>"
+    )
+    assert parse_public_profile_html(html_ok) == (
+        "Vui Nguyễn",
+        "https://scontent.xx.fbcdn.net/v/avt.jpg",
+    )
+
+    html_die = (
+        "<html><head><title>Facebook</title>"
+        '<meta property="og:image" content="https://static.xx.fbcdn.net/rsrc.php/fb_icon.png" />'
+        "</head></html>"
+    )
+    assert parse_public_profile_html(html_die) == (None, None)

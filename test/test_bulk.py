@@ -46,6 +46,13 @@ class _StubChecker:
     async def verify_live(self, uid: str) -> UidCheckResult:
         return await self.check(uid)
 
+    async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+        return (
+            ("Vui Nguyễn", "https://scontent.xx.fbcdn.net/avatar.jpg")
+            if self._outcomes.get(uid) == CheckOutcome.LIVE
+            else (None, None)
+        )
+
     async def close(self) -> None:
         return None
 
@@ -120,6 +127,7 @@ def test_extract_uids_deduplicates_caps_and_formats() -> None:
     summary = BulkSummary(job_id="job1", total=10, live=6, die=3, error=1, elapsed_seconds=1.25)
     assert "1.2s" in format_bulk_summary(summary) or "1.3s" in format_bulk_summary(summary)
     assert "LIVE" in format_single_check("4", CheckOutcome.LIVE)
+    assert "Vui Nguyễn" in format_single_check("4", CheckOutcome.LIVE, fb_name="Vui Nguyễn")
     assert "DIE" in format_single_check("4", CheckOutcome.DIE)
     assert "LỖI" in format_single_check("4", CheckOutcome.ERROR)
 

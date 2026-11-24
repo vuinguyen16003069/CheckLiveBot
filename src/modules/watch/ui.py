@@ -15,12 +15,6 @@ from pydantic import BaseModel
 
 from src.modules.watch.domain import WatchItem, WatchStatus
 
-REPLY_BTN_ADD = "➕ Lên kèo"
-REPLY_BTN_LIST = "📋 Danh sách"
-REPLY_BTN_CHECK = "🔎 Check nhanh"
-REPLY_BTN_STATS = "📊 Thống kê"
-REPLY_SHORTCUTS = {REPLY_BTN_ADD, REPLY_BTN_LIST, REPLY_BTN_CHECK, REPLY_BTN_STATS}
-
 
 class WizardStates(StatesGroup):
     waiting_uid = State()
@@ -72,8 +66,8 @@ class DealDraft(BaseModel):
 def build_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=REPLY_BTN_ADD), KeyboardButton(text=REPLY_BTN_LIST)],
-            [KeyboardButton(text=REPLY_BTN_CHECK), KeyboardButton(text=REPLY_BTN_STATS)],
+            [KeyboardButton(text="➕ Lên kèo"), KeyboardButton(text="📋 Danh sách")],
+            [KeyboardButton(text="🔎 Check nhanh"), KeyboardButton(text="📊 Thống kê")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -85,21 +79,21 @@ def build_dashboard_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=REPLY_BTN_ADD,
+                    text="➕ Lên kèo",
                     callback_data=DashboardCallback(action="add").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=REPLY_BTN_LIST,
+                    text="📋 Danh sách",
                     callback_data=DashboardCallback(action="list").pack(),
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text=REPLY_BTN_CHECK,
+                    text="🔎 Check nhanh",
                     callback_data=DashboardCallback(action="check").pack(),
                 ),
                 InlineKeyboardButton(
-                    text=REPLY_BTN_STATS,
+                    text="📊 Thống kê",
                     callback_data=DashboardCallback(action="stats").pack(),
                 ),
             ],

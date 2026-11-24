@@ -21,6 +21,8 @@ class WatchItem(BaseModel):
     chat_id: int
     owner_user_id: int
     uid: str
+    fb_name: str = ""
+    avatar_url: str = ""
     note: str
     price: str
     faq: str = ""
@@ -126,6 +128,12 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         uid_line = f"❌ <b>UID</b> {uid_val} - <b>ĐÃ HỦY</b>"
 
     lines = [header, "", uid_line]
+    if item.fb_name:
+        lines.append(
+            f"👤 <b>Tên Facebook:</b> {_spoiler(html.escape(item.fb_name), item.is_hidden)}"
+        )
+    elif item.status == WatchStatus.DIE:
+        lines.append(f"👤 <b>Tên Facebook:</b> {_spoiler('UID DIE', item.is_hidden)}")
     lines.append(f"📝 <b>Ghi chú:</b> {note_val}")
     lines.append(f"💰 <b>Giá:</b> {price_val}")
 

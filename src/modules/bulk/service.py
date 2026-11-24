@@ -69,6 +69,15 @@ class BulkCheckService:
         result = await self._checker.check(uid)
         return uid, result.outcome
 
+    async def check_single_uid_profile(
+        self, raw_uid: str
+    ) -> tuple[str, CheckOutcome, str | None, str | None]:
+        uid, outcome = await self.check_single_uid(raw_uid)
+        if outcome == CheckOutcome.LIVE:
+            fb_name, avatar_url = await self._checker.fetch_profile_info(uid)
+            return uid, outcome, fb_name, avatar_url
+        return uid, outcome, None, None
+
     def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int]:
         uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
         if not uids:

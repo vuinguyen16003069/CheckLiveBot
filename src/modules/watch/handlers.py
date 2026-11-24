@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from functools import partial
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -23,11 +22,6 @@ from src.modules.watch.domain import (
 )
 from src.modules.watch.service import DuplicateWatchError, WatchService
 from src.modules.watch.ui import (
-    REPLY_BTN_ADD,
-    REPLY_BTN_CHECK,
-    REPLY_BTN_LIST,
-    REPLY_BTN_STATS,
-    REPLY_SHORTCUTS,
     DashboardCallback,
     DealDraft,
     ListLookupStates,
@@ -55,18 +49,33 @@ class TelegramWatchNotifier:
         self._bot = bot
 
     async def notify_live(self, item: WatchItem) -> None:
-        send = partial(
-            self._bot.send_message,
-            chat_id=item.chat_id,
-            text=format_live_notification(item),
-            reply_markup=build_watch_keyboard(item),
-        )
+        text = format_live_notification(item)
+        markup = build_watch_keyboard(item)
+
+        async def _send_text() -> None:
+            await self._bot.send_message(chat_id=item.chat_id, text=text, reply_markup=markup)
+
+        async def _send() -> None:
+            if item.avatar_url:
+                try:
+                    await self._bot.send_photo(
+                        chat_id=item.chat_id,
+                        photo=item.avatar_url,
+                        caption=text,
+                        reply_markup=markup,
+                        has_spoiler=item.is_hidden,
+                    )
+                    return
+                except TelegramBadRequest:
+                    pass
+            await _send_text()
+
         try:
             try:
-                await send()
+                await _send()
             except TelegramRetryAfter as exc:
                 await asyncio.sleep(min(float(exc.retry_after), 5.0))
-                await send()
+                await _send()
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             logger.warning(
                 "watcher_notify_unreachable watch_id=%s chat_id=%s error=%s",
@@ -133,7 +142,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 return
             with contextlib.suppress(TelegramBadRequest):
                 await message.delete()
-            await message.answer(format_watch_card(item), reply_markup=_back_keyboard(item))
+            await _answer_watch_card(message, item, reply_markup=_back_keyboard(item))
             return
 
         async def _attach_keyboard() -> Message:
@@ -173,13 +182,13 @@ def create_watch_router(watch_service: WatchService) -> Router:
         await state.clear()
         await message.answer("🛑 Đã hủy thao tác hiện tại.", reply_markup=build_reply_keyboard())
 
-    @router.message(F.text.in_(REPLY_SHORTCUTS))
+    @router.message(F.text.in_({"➕ Lên kèo", "📋 Danh sách", "🔎 Check nhanh", "📊 Thống kê"}))
     async def handle_reply_shortcuts(message: Message, state: FSMContext, bot: Bot) -> None:
         action = {
-            REPLY_BTN_ADD: "add",
-            REPLY_BTN_LIST: "list",
-            REPLY_BTN_CHECK: "check",
-            REPLY_BTN_STATS: "stats",
+            "➕ Lên kèo": "add",
+            "📋 Danh sách": "list",
+            "🔎 Check nhanh": "check",
+            "📊 Thống kê": "stats",
         }[message.text or ""]
         await run_menu(action, message, state, bot)
 
@@ -210,8 +219,10 @@ def create_watch_router(watch_service: WatchService) -> Router:
         except ValueError as exc:
             await message.answer(f"❌ {exc}")
             return
-        await message.answer(
-            format_watch_card(item, title="✅ Đã thêm UID thành công!"),
+        await _answer_watch_card(
+            message,
+            item,
+            title="✅ Đã thêm UID thành công!",
             reply_markup=build_watch_keyboard(item),
         )
 
@@ -339,7 +350,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 f"📭 Không tìm thấy kèo nào có UID <code>{uid}</code> trong danh sách."
             )
             return
-        await message.answer(format_watch_card(item), reply_markup=_back_keyboard(item))
+        await _answer_watch_card(message, item, reply_markup=_back_keyboard(item))
 
     @router.message(Command("stats"))
     async def cmd_stats(message: Message, state: FSMContext) -> None:
@@ -357,8 +368,11 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
         await query.answer(f"🔄 Đã quét {scanned} kèo DIE — {len(turned_live)} kèo về LIVE!")
         for item in turned_live:
-            await msg.answer(
-                format_live_notification(item), reply_markup=build_watch_keyboard(item)
+            await _answer_watch_card(
+                msg,
+                item,
+                title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!",
+                reply_markup=build_watch_keyboard(item),
             )
 
     @router.callback_query(QuickWatchCallback.filter())
@@ -393,7 +407,10 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
         await state.set_state(ListLookupStates.waiting_uid)
         text, markup = await render_list(msg.chat.id, bot, callback_data.status, callback_data.page)
-        await _safe_edit(msg, text, markup)
+        if msg.photo:
+            await msg.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        else:
+            await _safe_edit(msg, text, markup)
         await query.answer()
 
     @router.callback_query(WatchActionCallback.filter())
@@ -630,10 +647,35 @@ def _duplicate_keyboard(watch_id: int, *, in_wizard: bool) -> InlineKeyboardMark
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
+async def _answer_watch_card(
+    message: Message,
+    item: WatchItem,
+    *,
+    title: str | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    text = format_watch_card(item, title=title)
+    if item.status != WatchStatus.DIE and item.avatar_url:
+        try:
+            await message.answer_photo(
+                photo=item.avatar_url,
+                caption=text,
+                reply_markup=reply_markup,
+                has_spoiler=item.is_hidden,
+            )
+            return
+        except TelegramBadRequest:
+            pass
+    await message.answer(text, reply_markup=reply_markup)
+
+
 async def _safe_edit(
     message: Message,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     with contextlib.suppress(TelegramBadRequest):
-        await message.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+        if message.photo:
+            await message.edit_caption(caption=text, reply_markup=reply_markup)
+        else:
+            await message.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)

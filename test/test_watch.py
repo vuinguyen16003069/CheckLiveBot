@@ -64,6 +64,11 @@ class _StubChecker:
             detail="Trang Linh",
         )
 
+    async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+        if self.mapping.get(uid) == CheckOutcome.LIVE:
+            return "Trang Linh", "https://scontent.xx.fbcdn.net/avatar.jpg"
+        return None, None
+
     async def close(self) -> None:
         return None
 

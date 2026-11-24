@@ -157,15 +157,19 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             await query.answer()
             return
         try:
-            uid, outcome = await bulk_service.check_single_uid(callback_data.uid)
+            uid, outcome, fb_name, _avatar_url = await bulk_service.check_single_uid_profile(
+                callback_data.uid
+            )
         except ValueError as exc:
             await query.answer(str(exc), show_alert=True)
             return
+        text = format_single_check(uid, outcome, fb_name=fb_name)
+        markup = build_single_check_markup(uid, outcome)
         with contextlib.suppress(TelegramBadRequest):
-            await msg.edit_text(
-                format_single_check(uid, outcome),
-                reply_markup=build_single_check_markup(uid, outcome),
-            )
+            if msg.photo:
+                await msg.edit_caption(caption=text, reply_markup=markup)
+            else:
+                await msg.edit_text(text, reply_markup=markup)
         await query.answer(f"🔄 Kết quả mới nhất: {outcome.value}")
 
     @router.callback_query(CancelBulkCallback.filter())
@@ -267,14 +271,19 @@ async def _reply_single_check(
         with contextlib.suppress(Exception):
             await message.bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
     try:
-        uid, outcome = await bulk_service.check_single_uid(raw)
+        uid, outcome, fb_name, avatar_url = await bulk_service.check_single_uid_profile(raw)
     except ValueError as exc:
         await message.answer(f"❌ {exc}")
         return
-    await message.answer(
-        format_single_check(uid, outcome),
-        reply_markup=build_single_check_markup(uid, outcome),
-    )
+    text = format_single_check(uid, outcome, fb_name=fb_name)
+    markup = build_single_check_markup(uid, outcome)
+    if outcome == CheckOutcome.LIVE and avatar_url:
+        try:
+            await message.answer_photo(photo=avatar_url, caption=text, reply_markup=markup)
+            return
+        except TelegramBadRequest:
+            pass
+    await message.answer(text, reply_markup=markup)
 
 
 async def _start_bulk_prepared(

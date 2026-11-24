@@ -18,17 +18,13 @@ class BulkSummary(BaseModel):
     elapsed_seconds: float
 
 
-_PROFILE_URL_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", re.IGNORECASE)
-_EMBEDDED_UID_RE = re.compile(r"\b([1-9]\d{4,19})\b")
-
-
 def extract_uid(raw: str) -> str | None:
     text = raw.strip()
     if not text:
         return None
     if text.isascii() and text.isdigit():
         return text if len(text) <= 20 and text[0] != "0" else None
-    if match := _PROFILE_URL_RE.search(text):
+    if match := re.search(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", text, re.IGNORECASE):
         return match.group(1)
     return None
 
@@ -44,7 +40,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = _EMBEDDED_UID_RE.search(stripped)
+            token_match = re.search(r"\b([1-9]\d{4,19})\b", stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1
@@ -104,14 +100,22 @@ def format_bulk_summary(summary: BulkSummary) -> str:
     )
 
 
-def format_single_check(uid: str, outcome: CheckOutcome) -> str:
+def format_single_check(
+    uid: str,
+    outcome: CheckOutcome,
+    *,
+    fb_name: str | None = None,
+) -> str:
     badge = {
         CheckOutcome.LIVE: "✅ <b>LIVE</b>",
         CheckOutcome.DIE: "❌ <b>DIE</b>",
         CheckOutcome.ERROR: "⚠️ <b>LỖI MẠNG / KHÔNG XÁC ĐỊNH</b>",
     }[outcome]
+    name_line = f"\n👤 <b>Tên Facebook:</b> {html.escape(fb_name)}" if fb_name else ""
     return (
-        f"🔎 <b>Kiểm tra nhanh UID</b>\n🆔 <code>{html.escape(uid)}</code>\n📌 Trạng thái: {badge}"
+        f"🔎 <b>Kiểm tra nhanh UID</b>\n"
+        f"🆔 <code>{html.escape(uid)}</code>{name_line}\n"
+        f"📌 Trạng thái: {badge}"
     )
 
 

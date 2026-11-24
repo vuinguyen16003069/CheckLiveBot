@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import random
+import re
 import time
 from collections.abc import Sequence
 from typing import Any, cast
@@ -12,9 +14,6 @@ from curl_cffi.requests import AsyncSession
 from src.core.ports import CheckOutcome, UidCheckResult
 
 logger = logging.getLogger(__name__)
-
-_TRANSIENT_GRAPH_ERROR_CODES = frozenset({1, 2, 4, 17, 32, 341, 613})
-_SILHOUETTE_MARKERS = ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g")
 
 
 class _RetryableCheckError(Exception):
@@ -127,6 +126,33 @@ class CurlCffiFacebookChecker:
         await asyncio.sleep(self._verify_delay)
         return await self._check_direct(uid)
 
+    async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+        """Best-effort fetch of public Facebook name and avatar URL for a LIVE UID (no login)."""
+        url = f"https://www.facebook.com/profile.php?id={uid}"
+        kwargs: dict[str, Any] = {
+            "timeout": (self._connect_timeout, self._timeout),
+            "allow_redirects": True,
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+            },
+        }
+        proxy = self._proxy_pool.next_proxy()
+        if proxy:
+            kwargs["proxy"] = proxy
+        try:
+            response: Any = await self._session.get(url, **kwargs)
+            body = getattr(response, "text", "")
+            if not isinstance(body, str) or not body:
+                return None, None
+            return parse_public_profile_html(body)
+        except Exception as exc:
+            logger.debug("fb_profile_info_failed uid=%s error=%s", uid, exc)
+            return None, None
+
     async def close(self) -> None:
         pending = list(self._inflight.values())
         self._inflight.clear()
@@ -207,7 +233,7 @@ def parse_graph_picture_payload(
             err_dict = cast(dict[str, Any], err_raw)
             code = err_dict.get("code")
             if bool(err_dict.get("is_transient")) or (
-                type(code) is int and code in _TRANSIENT_GRAPH_ERROR_CODES
+                type(code) is int and code in {1, 2, 4, 17, 32, 341, 613}
             ):
                 return CheckOutcome.ERROR, f"graph_transient_{code}"
         return CheckOutcome.DIE, "graph_error"
@@ -229,7 +255,68 @@ def parse_graph_picture_payload(
         return CheckOutcome.DIE, "missing_avatar_dimensions"
 
     url_lower = url.lower()
-    if data.get("is_silhouette") and any(marker in url_lower for marker in _SILHOUETTE_MARKERS):
+    if data.get("is_silhouette") and any(
+        marker in url_lower for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "c5yt7c_3z_g")
+    ):
         return CheckOutcome.DIE, "silhouette_placeholder"
 
     return CheckOutcome.LIVE, None
+
+
+def parse_public_profile_html(body: str) -> tuple[str | None, str | None]:
+    """Extract (fb_name, avatar_url) from public Facebook profile HTML metadata."""
+    name: str | None = None
+    og_title = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+        body,
+        re.IGNORECASE,
+    )
+    if og_title is None:
+        og_title = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+            body,
+            re.IGNORECASE,
+        )
+    if og_title:
+        candidate = html.unescape(og_title.group(1)).strip()
+    else:
+        title_m = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        candidate = html.unescape(title_m.group(1)).strip() if title_m else ""
+        for sep in (" | Facebook", " - Facebook", " • Facebook", " (@"):
+            if sep in candidate:
+                candidate = candidate.split(sep, 1)[0].strip()
+
+    lowered = candidate.lower()
+    if candidate and lowered not in {
+        "facebook",
+        "log in or sign up",
+        "log into facebook",
+        "facebook - log in or sign up",
+        "error",
+        "page not found",
+        "content not found",
+    }:
+        name = candidate
+
+    avatar_url: str | None = None
+    og_image = re.search(
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        body,
+        re.IGNORECASE,
+    )
+    if og_image is None:
+        og_image = re.search(
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            body,
+            re.IGNORECASE,
+        )
+    if og_image:
+        raw_img = html.unescape(og_image.group(1)).strip()
+        img_lower = raw_img.lower()
+        if raw_img.startswith(("http://", "https://")) and not any(
+            marker in img_lower
+            for marker in ("static.xx.fbcdn.net", "/rsrc.php/", "fb_icon", "c5yt7c_3z_g")
+        ):
+            avatar_url = raw_img
+
+    return name, avatar_url

@@ -70,6 +70,8 @@ class RedisWatchRepository:
         price: str,
         faq: str,
         status: WatchStatus,
+        fb_name: str = "",
+        avatar_url: str = "",
     ) -> WatchItem:
         seq_key = self._k("seq:watch_id")
         watch_id = await self._redis.incr(seq_key)
@@ -79,6 +81,8 @@ class RedisWatchRepository:
             chat_id=chat_id,
             owner_user_id=owner_user_id,
             uid=uid,
+            fb_name=fb_name,
+            avatar_url=avatar_url,
             note=note,
             price=price,
             faq=faq,
@@ -352,10 +356,18 @@ class WatchService:
             )
 
         initial_status = WatchStatus.LIVE if res.outcome == CheckOutcome.LIVE else WatchStatus.DIE
+        fb_name = ""
+        avatar_url = ""
+        if initial_status == WatchStatus.LIVE:
+            fetched_name, fetched_avatar = await self._checker.fetch_profile_info(parsed.uid)
+            fb_name = fetched_name or ""
+            avatar_url = fetched_avatar or ""
         item = await self._repo.create(
             chat_id=chat_id,
             owner_user_id=user_id,
             uid=parsed.uid,
+            fb_name=fb_name,
+            avatar_url=avatar_url,
             note=parsed.note,
             price=parsed.price,
             faq=parsed.faq,
@@ -417,6 +429,7 @@ class WatchService:
                     verified = await self._checker.verify_live(item.uid)
                     if verified.outcome != CheckOutcome.LIVE:
                         return
+                    fb_name, avatar_url = await self._checker.fetch_profile_info(item.uid)
                 now = datetime.now(UTC)
                 item.last_checked_at = now
                 if self._lock is not None:
@@ -428,6 +441,10 @@ class WatchService:
                         return
                 item.status = WatchStatus.LIVE
                 item.live_detected_at = now
+                if fb_name:
+                    item.fb_name = fb_name
+                if avatar_url:
+                    item.avatar_url = avatar_url
                 await self._repo.update(item, previous_status=WatchStatus.DIE)
                 turned_live.append(item)
             except Exception as exc:
@@ -543,6 +560,7 @@ class WatcherScanService:
                             verified.outcome.value,
                         )
                         return 0
+                    fb_name, avatar_url = await self._checker.fetch_profile_info(uid)
 
                 now = datetime.now(UTC)
                 count = 0
@@ -554,6 +572,10 @@ class WatcherScanService:
                     item.last_checked_at = now
                     item.status = WatchStatus.LIVE
                     item.live_detected_at = now
+                    if fb_name:
+                        item.fb_name = fb_name
+                    if avatar_url:
+                        item.avatar_url = avatar_url
                     item.is_hidden = await _get_hidden(item.chat_id)
                     try:
                         await self._notifier.notify_live(item)
