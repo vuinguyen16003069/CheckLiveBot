@@ -444,3 +444,59 @@ async def test_unified_90d_ttl_on_all_keys_and_lazy_prune() -> None:
     re_added = await svc.add_watch(100, 1, "100001 | Re-added | 50k")
     assert re_added.uid == "100001"
     await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.filters import CommandObject
+    from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+
+    from src.modules.watch.handlers import create_watch_router
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    repo = RedisWatchRepository(redis, prefix="test")
+    svc = WatchService(repo=repo, checker=_StubChecker({}))
+    router = create_watch_router(svc)
+
+    start_handler = next(
+        h.callback for h in router.message.handlers if h.callback.__name__ == "cmd_start"
+    )
+
+    sent_messages: list[MagicMock] = []
+
+    async def _fake_answer(text: str, **kwargs: object) -> MagicMock:
+        sent = MagicMock()
+        sent.text = text
+        sent.kwargs = kwargs
+        sent.delete = AsyncMock()
+        sent_messages.append(sent)
+        return sent
+
+    message = MagicMock()
+    message.chat.id = 100
+    message.answer = AsyncMock(side_effect=_fake_answer)
+    state = MagicMock()
+    state.clear = AsyncMock()
+
+    await start_handler(
+        message=message,
+        command=CommandObject(prefix="/", command="start", args=None),
+        state=state,
+    )
+
+    assert len(sent_messages) == 2
+    reply_kb = sent_messages[0].kwargs.get("reply_markup")
+    assert isinstance(reply_kb, ReplyKeyboardMarkup)
+    assert reply_kb.is_persistent is True
+    assert reply_kb.resize_keyboard is True
+    assert sum(len(row) for row in reply_kb.keyboard) == 4
+    sent_messages[0].delete.assert_awaited_once()
+
+    dashboard_kb = sent_messages[1].kwargs.get("reply_markup")
+    assert isinstance(dashboard_kb, InlineKeyboardMarkup)
+    assert sum(len(row) for row in dashboard_kb.inline_keyboard) == 4
+    assert "Đang chờ: <b>0</b>" in sent_messages[1].text
+
+    await redis.aclose()
