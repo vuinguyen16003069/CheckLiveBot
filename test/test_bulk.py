@@ -207,14 +207,14 @@ async def test_bulk_check_service_runs_guards_and_closes_cleanly() -> None:
     assert svc.is_chat_busy(555) is True
     assert svc.is_chat_busy(666) is False
 
-    # Same chat is blocked while active; different chat is allowed concurrently
-    with pytest.raises(ValueError, match="đang có 1 phiên"):
-        svc.start_bulk_text(
-            chat_id=555,
-            text="100001\n100002\n",
-            status_message_id=78,
-            notifier=notifier,
-        )
+    # Both same chat and different chat can run concurrent bulk jobs cleanly
+    same_chat_notifier = _StubBulkNotifier()
+    svc.start_bulk_text(
+        chat_id=555,
+        text="100001\n100002\n",
+        status_message_id=78,
+        notifier=same_chat_notifier,
+    )
     svc.start_bulk_text(
         chat_id=666,
         text="100001\n100003\n",
@@ -223,6 +223,7 @@ async def test_bulk_check_service_runs_guards_and_closes_cleanly() -> None:
     )
 
     await asyncio.wait_for(notifier.done.wait(), timeout=5.0)
+    await asyncio.wait_for(same_chat_notifier.done.wait(), timeout=5.0)
     await asyncio.wait_for(other_notifier.done.wait(), timeout=5.0)
     await asyncio.sleep(0)
     assert svc.is_chat_busy(555) is False

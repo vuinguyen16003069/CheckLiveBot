@@ -212,11 +212,6 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         buf = io.BytesIO()
         await bot.download(document, destination=buf)
         raw_bytes = buf.getvalue()
-        if bulk_service.is_chat_busy(message.chat.id):
-            await message.answer(
-                "⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất."
-            )
-            return
         try:
             if len(raw_bytes) > 65536:
                 job_id, uids, _ = await asyncio.to_thread(
@@ -294,9 +289,6 @@ async def _start_bulk_prepared(
 ) -> None:
     if message.bot is None:
         return
-    if bulk_service.is_chat_busy(message.chat.id):
-        await message.answer("⏳ Chat đang có 1 phiên check hàng loạt chạy, vui lòng chờ hoàn tất.")
-        return
 
     status_msg = await message.answer(
         format_bulk_progress(
@@ -309,15 +301,10 @@ async def _start_bulk_prepared(
         ),
         reply_markup=build_bulk_progress_markup(job_id),
     )
-    try:
-        bulk_service.start_bulk_uids(
-            job_id=job_id,
-            chat_id=message.chat.id,
-            status_message_id=status_msg.message_id,
-            uids=uids,
-            notifier=TelegramBulkNotifier(message.bot, job_id=job_id),
-        )
-    except ValueError as exc:
-        with contextlib.suppress(TelegramBadRequest):
-            await status_msg.delete()
-        await message.answer(str(exc))
+    bulk_service.start_bulk_uids(
+        job_id=job_id,
+        chat_id=message.chat.id,
+        status_message_id=status_msg.message_id,
+        uids=uids,
+        notifier=TelegramBulkNotifier(message.bot, job_id=job_id),
+    )
