@@ -10,6 +10,7 @@ import time
 from collections.abc import Sequence
 from typing import Any, cast
 
+from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
 
 from src.core.ports import CheckOutcome, UidCheckResult
@@ -79,6 +80,12 @@ class ProxyPool:
         self._failures.pop(proxy, None)
         self._cooldown_until.pop(proxy, None)
 
+    def has_healthy_proxy(self) -> bool:
+        if not self._proxies:
+            return False
+        now = time.monotonic()
+        return any(self._cooldown_until.get(p, 0.0) <= now for p in self._proxies)
+
     def __len__(self) -> int:
         return len(self._proxies)
 
@@ -102,11 +109,19 @@ class CurlCffiFacebookChecker:
         self._owns_session = session is None
         self._session: AsyncSession[Any] = session or AsyncSession(
             impersonate="chrome",
-            max_clients=max(10, max_clients),
+            max_clients=max(20, max_clients + 25),
             allow_redirects=False,
             discard_cookies=True,
+            curl_options={
+                CurlOpt.IPRESOLVE: 1,
+                CurlOpt.DNS_CACHE_TIMEOUT: 300,
+            },
         )
         self._inflight: dict[str, asyncio.Task[UidCheckResult]] = {}
+        self._profile_inflight: dict[str, asyncio.Task[tuple[str | None, str | None]]] = {}
+        self._profile_cache: dict[str, tuple[float, str | None, str | None]] = {}
+        self._rate_limit_until = 0.0
+        self._consecutive_rate_limits = 0
 
     async def __aenter__(self) -> CurlCffiFacebookChecker:
         return self
@@ -127,6 +142,22 @@ class CurlCffiFacebookChecker:
         return await self._check_direct(uid)
 
     async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+        now = time.monotonic()
+        cached = self._profile_cache.get(uid)
+        if cached is not None:
+            expires_at, cached_name, cached_avatar = cached
+            if now < expires_at:
+                return cached_name, cached_avatar
+            self._profile_cache.pop(uid, None)
+
+        task = self._profile_inflight.get(uid)
+        if task is None:
+            task = asyncio.create_task(self._fetch_profile_direct(uid))
+            self._profile_inflight[uid] = task
+            task.add_done_callback(lambda done: self._release_profile(uid, done))
+        return await asyncio.shield(task)
+
+    async def _fetch_profile_direct(self, uid: str) -> tuple[str | None, str | None]:
         kwargs: dict[str, Any] = {
             "timeout": (4.0, max(6.0, self._timeout)),
             "allow_redirects": True,
@@ -149,8 +180,12 @@ class CurlCffiFacebookChecker:
                 f"https://www.facebook.com/profile.php?id={uid}", **kwargs
             )
             body = await self._read_head(response)
-            return parse_public_profile_html(body) if body else (None, None)
+            self._proxy_pool.report_success(proxy)
+            result = parse_public_profile_html(body) if body else (None, None)
+            self._cache_profile(uid, result[0], result[1])
+            return result
         except Exception as exc:
+            self._proxy_pool.report_failure(proxy)
             logger.warning("fb_profile_info_failed uid=%s error=%s", uid, exc)
             return None, None
         finally:
@@ -159,8 +194,13 @@ class CurlCffiFacebookChecker:
                     await response.aclose()
 
     async def close(self) -> None:
-        pending = list(self._inflight.values())
+        pending: list[asyncio.Task[Any]] = [
+            *self._inflight.values(),
+            *self._profile_inflight.values(),
+        ]
         self._inflight.clear()
+        self._profile_inflight.clear()
+        self._profile_cache.clear()
         for task in pending:
             task.cancel()
         if pending:
@@ -171,6 +211,21 @@ class CurlCffiFacebookChecker:
     def _release(self, uid: str, task: asyncio.Task[UidCheckResult]) -> None:
         if self._inflight.get(uid) is task:
             del self._inflight[uid]
+
+    def _release_profile(self, uid: str, task: asyncio.Task[tuple[str | None, str | None]]) -> None:
+        if self._profile_inflight.get(uid) is task:
+            del self._profile_inflight[uid]
+
+    def _cache_profile(self, uid: str, name: str | None, avatar_url: str | None) -> None:
+        now = time.monotonic()
+        if len(self._profile_cache) >= 512:
+            expired = [k for k, v in self._profile_cache.items() if v[0] <= now]
+            for k in expired:
+                del self._profile_cache[k]
+            if len(self._profile_cache) >= 512:
+                oldest = next(iter(self._profile_cache))
+                del self._profile_cache[oldest]
+        self._profile_cache[uid] = (now + 60.0, name, avatar_url)
 
     @staticmethod
     async def _read_head(response: Any) -> str:
@@ -206,7 +261,19 @@ class CurlCffiFacebookChecker:
         logger.warning("fb_check_retry_exhausted uid=%s error=%s", uid, last_error)
         return UidCheckResult(uid=uid, outcome=CheckOutcome.ERROR, detail=str(last_error))
 
+    def _note_rate_limit(self) -> None:
+        if self._proxy_pool.has_healthy_proxy():
+            return
+        self._consecutive_rate_limits += 1
+        if self._consecutive_rate_limits >= 3:
+            pause = min(0.5 * (2 ** (self._consecutive_rate_limits - 3)), 2.0)
+            self._rate_limit_until = max(self._rate_limit_until, time.monotonic() + pause)
+
     async def _fetch_graph_once(self, url: str) -> tuple[CheckOutcome, str | None]:
+        wait = self._rate_limit_until - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+
         kwargs: dict[str, Any] = {"timeout": (self._connect_timeout, self._timeout)}
         proxy = self._proxy_pool.next_proxy()
         if proxy:
@@ -221,6 +288,8 @@ class CurlCffiFacebookChecker:
         status = int(response.status_code)
         if status in (403, 429) or status >= 500 or 300 <= status < 400:
             self._proxy_pool.report_failure(proxy)
+            if status == 429:
+                self._note_rate_limit()
             raise _RetryableCheckError(f"http_{status}")
 
         try:
@@ -228,6 +297,7 @@ class CurlCffiFacebookChecker:
         except Exception as exc:
             if status == 404:
                 self._proxy_pool.report_success(proxy)
+                self._consecutive_rate_limits = 0
                 return CheckOutcome.DIE, "http_404"
             self._proxy_pool.report_failure(proxy)
             raise _RetryableCheckError(f"invalid_json_http_{status}") from exc
@@ -235,9 +305,11 @@ class CurlCffiFacebookChecker:
         outcome, detail = parse_graph_picture_payload(payload, status)
         if outcome == CheckOutcome.ERROR and detail and detail.startswith("graph_transient_"):
             self._proxy_pool.report_failure(proxy)
+            self._note_rate_limit()
             raise _RetryableCheckError(detail)
 
         self._proxy_pool.report_success(proxy)
+        self._consecutive_rate_limits = 0
         return outcome, detail
 
 

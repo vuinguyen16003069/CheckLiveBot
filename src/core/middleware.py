@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,15 @@ class ThrottlingMiddleware(BaseMiddleware):
                 del self._windows[uid]
         return True
 
+    def retry_after_seconds(self, user_id: int) -> int:
+        if self._limit <= 0:
+            return 0
+        window = self._windows.get(user_id)
+        if not window or len(window) < self._limit:
+            return 0
+        remaining = 60.0 - (time.monotonic() - window[0])
+        return max(1, math.ceil(remaining))
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -48,11 +58,14 @@ class ThrottlingMiddleware(BaseMiddleware):
             user_id = event.from_user.id
 
         if user_id is not None and not self.check_rate_limit(user_id):
+            wait = self.retry_after_seconds(user_id)
             if isinstance(event, Message):
-                await event.answer("⏳ Bạn thao tác hơi nhanh, vui lòng chờ vài giây rồi thử lại.")
+                await event.answer(
+                    f"⏳ Bạn thao tác hơi nhanh, vui lòng chờ {wait} giây rồi thử lại."
+                )
             elif isinstance(event, CallbackQuery):
                 await event.answer(
-                    "⏳ Thao tác quá nhanh, thử lại sau vài giây.",
+                    f"⏳ Thao tác quá nhanh, thử lại sau {wait} giây.",
                     show_alert=False,
                 )
             return None

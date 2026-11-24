@@ -261,8 +261,10 @@ async def test_redis_lock_and_throttling_middleware(monkeypatch: pytest.MonkeyPa
     assert throttle.check_rate_limit(99) is True
     assert throttle.check_rate_limit(99) is True
     assert throttle.check_rate_limit(99) is False
+    assert 55 <= throttle.retry_after_seconds(99) <= 60
     now_ref[0] += 61.0
     assert throttle.check_rate_limit(99) is True
+    assert throttle.retry_after_seconds(99) == 0
 
     # Middleware __call__ blocks Message & CallbackQuery when rate-limited
     handler = AsyncMock(return_value="ok")
@@ -380,3 +382,233 @@ def test_parse_public_profile_html_extracts_name_and_avatar() -> None:
         "</head></html>"
     )
     assert parse_public_profile_html(html_die) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
+    class _ProfileSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            self.calls += 1
+            await asyncio.sleep(0.03)
+            return SimpleNamespace(
+                text=(
+                    '<html><head><meta property="og:title" content="Mark Zuckerberg" />'
+                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/a.jpg" />'
+                    "</head></html>"
+                )
+            )
+
+        async def close(self) -> None:
+            return None
+
+    sess = _ProfileSession()
+    checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
+    # 4 concurrent calls coalesce into 1 HTTP request
+    batch = await asyncio.gather(*(checker.fetch_profile_info("4") for _ in range(4)))
+    assert all(r == ("Mark Zuckerberg", "https://scontent.xx.fbcdn.net/a.jpg") for r in batch)
+    assert sess.calls == 1
+    # Subsequent call within 60s hits in-memory cache (0 HTTP requests)
+    again = await checker.fetch_profile_info("4")
+    assert again == ("Mark Zuckerberg", "https://scontent.xx.fbcdn.net/a.jpg")
+    assert sess.calls == 1
+    await checker.close()
+
+
+def test_config_env_file_parsing_overrides_and_formatters(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import logging
+    from pathlib import Path
+
+    from pydantic import ValidationError
+
+    from src.core.config import _ConsoleFormatter, _JsonFormatter, _load_env_file  # type: ignore[reportPrivateUsage]
+
+    missing = _load_env_file(Path(tmp_path) / "nonexistent.env")
+    assert missing == {}
+
+    env_file = Path(tmp_path) / ".env"
+    env_file.write_text(
+        "\n# comment line\n"
+        "INVALID_LINE_NO_EQUALS\n"
+        " =empty_key\n"
+        'BOT_TOKEN="quoted-token"\n'
+        "REDIS_URL='redis://custom:6379/1'\n"
+        "CONCURRENCY=42\n"
+        "PROXY_LIST=http://a:80, http://b:80\n",
+        encoding="utf-8",
+    )
+    parsed = _load_env_file(env_file)
+    assert parsed["BOT_TOKEN"] == "quoted-token"
+    assert parsed["REDIS_URL"] == "redis://custom:6379/1"
+    assert parsed["CONCURRENCY"] == "42"
+
+    # Explicit overrides take priority over os.environ and .env (including lowercase field name)
+    monkeypatch.setenv("CONCURRENCY", "77")
+    s_env = Settings(BOT_TOKEN="t", REDIS_URL="redis://localhost:6379/0")
+    assert s_env.concurrency == 77
+    s_override = Settings(bot_token="override", concurrency=15)
+    assert s_override.bot_token == "override"
+    assert s_override.concurrency == 15
+
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"BOT_TOKEN": "t", "CONCURRENCY": 9999})
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"BOT_TOKEN": "t", "POLL_INTERVAL_SECONDS": 1})
+
+    # Formatters with and without exception info
+    json_fmt = _JsonFormatter()
+    console_fmt = _ConsoleFormatter()
+    rec = logging.LogRecord("test.logger", logging.INFO, __file__, 1, "hello %s", ("world",), None)
+    assert '"message": "hello world"' in json_fmt.format(rec)
+    assert "hello world" in console_fmt.format(rec)
+
+    try:
+        raise ValueError("sample failure")
+    except ValueError:
+        import sys
+
+        exc_rec = logging.LogRecord(
+            "test.logger", logging.ERROR, __file__, 1, "boom", (), sys.exc_info()
+        )
+    assert '"exception"' in json_fmt.format(exc_rec)
+    assert "ValueError: sample failure" in console_fmt.format(exc_rec)
+
+
+@pytest.mark.asyncio
+async def test_middleware_pruning_and_anonymous_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    now_ref = [500.0]
+    monkeypatch.setattr("src.core.middleware.time.monotonic", lambda: now_ref[0])
+    mw = ThrottlingMiddleware(limit_per_minute=2)
+
+    # Fill > 2048 stale users to trigger opportunistic pruning
+    for uid in range(2050):
+        assert mw.check_rate_limit(uid) is True
+    now_ref[0] += 120.0
+    assert mw.check_rate_limit(99999) is True
+    assert mw.retry_after_seconds(99999) == 0
+
+    # Event with from_user=None bypasses throttling
+    handler = AsyncMock(return_value="passed")
+    anon_msg = AsyncMock(spec=Message)
+    anon_msg.from_user = None
+    assert await mw(handler, anon_msg, {}) == "passed"
+    assert handler.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_checker_stream_head_adaptive_429_redirects_and_profile_edge_cases() -> None:
+    # 1. parse_public_profile_html: reversed attr order, <title> fallback, invalid names/images
+    html_reversed = (
+        '<html><head><meta content="Nguyễn &amp; Bạn" property="og:title" />'
+        '<meta content="https://scontent.xx.fbcdn.net/img.jpg" property="og:image" />'
+        "</head></html>"
+    )
+    assert parse_public_profile_html(html_reversed) == (
+        "Nguyễn & Bạn",
+        "https://scontent.xx.fbcdn.net/img.jpg",
+    )
+
+    html_title_fallback = (
+        "<html><head><title>Jane Doe (@janedoe) • Facebook</title>"
+        '<meta property="og:image" content="not-a-url" /></head></html>'
+    )
+    assert parse_public_profile_html(html_title_fallback) == ("Jane Doe", None)
+    assert parse_public_profile_html("<title>Log in or sign up</title>") == (None, None)
+    assert parse_public_profile_html("") == (None, None)
+
+    # 2. Streaming aiter_content stops early at </head> and always calls aclose()
+    class _StreamResponse:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.closed = False
+            self.yielded = 0
+
+        async def aiter_content(self) -> Any:
+            for c in self._chunks:
+                self.yielded += 1
+                yield c
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream_resp = _StreamResponse(
+        [
+            b'<html><head><meta property="og:title" content="Stream User" />',
+            b'<meta property="og:image" content="https://scontent.xx.fbcdn.net/s.jpg" /></head>',
+            b"<body>HUGE BODY SHOULD NOT BE READ</body>",
+        ]
+    )
+    stream_session = _FakeSession([stream_resp])
+    checker_stream = CurlCffiFacebookChecker(session=stream_session)  # type: ignore[arg-type]
+    assert await checker_stream.fetch_profile_info("10001") == (
+        "Stream User",
+        "https://scontent.xx.fbcdn.net/s.jpg",
+    )
+    assert stream_resp.yielded == 2
+    assert stream_resp.closed is True
+
+    # 3. Profile fetch error returns (None, None) without raising
+    err_session = _FakeSession([RuntimeError("profile network down")])
+    checker_err = CurlCffiFacebookChecker(
+        proxies=["http://p1:8080"],
+        session=err_session,  # type: ignore[arg-type]
+    )
+    assert await checker_err.fetch_profile_info("10002") == (None, None)
+
+    # 4. HTTP 302 redirect is treated as retryable; 429 triggers adaptive rate-limit backoff
+    redirect_and_429 = _FakeSession(
+        [
+            _resp(302, ValueError("redirect html")),
+            _resp(429, {}),
+            _resp(429, {}),
+            _resp(429, {}),
+            _resp(200, {"data": {"height": 50, "width": 50, "url": "https://scontent/ok.jpg"}}),
+        ]
+    )
+    checker_rl = CurlCffiFacebookChecker(
+        max_retries=5,
+        session=redirect_and_429,  # type: ignore[arg-type]
+    )
+    res_rl = await checker_rl.check("10003")
+    assert res_rl.outcome == CheckOutcome.LIVE
+    assert len(redirect_and_429.calls) == 5
+
+    # 5. ProxyPool all-cooldown fallback picks earliest-ready proxy and handles None reports
+    pool = ProxyPool(["http://p1:8080", "http://p2:8080"], base_cooldown_seconds=30.0)
+    assert pool.has_healthy_proxy() is True
+    pool.report_failure(None)
+    pool.report_success(None)
+    pool.report_failure("http://p1:8080")
+    pool.report_failure("http://p2:8080")
+    assert pool.has_healthy_proxy() is False
+    assert pool.next_proxy() == "http://p1:8080"
+    assert ProxyPool([]).has_healthy_proxy() is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_bot_validates_token_and_closes_redis_on_ping_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.core.runtime import install_uvloop_if_available, run_bot
+
+    install_uvloop_if_available()
+
+    with pytest.raises(RuntimeError, match="BOT_TOKEN is required"):
+        await run_bot(Settings(BOT_TOKEN=""))
+
+    fake_redis = AsyncMock()
+    fake_redis.ping = AsyncMock(side_effect=ConnectionError("redis down"))
+    fake_redis.aclose = AsyncMock()
+
+    def _fake_client(_url: str) -> AsyncMock:
+        return fake_redis
+
+    monkeypatch.setattr("src.core.runtime.create_redis_client", _fake_client)
+
+    with pytest.raises(ConnectionError, match="redis down"):
+        await run_bot(Settings(BOT_TOKEN="123:abc", REDIS_URL="redis://localhost:6379/0"))
+    fake_redis.aclose.assert_awaited_once()

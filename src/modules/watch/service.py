@@ -445,12 +445,12 @@ class WatchService:
             try:
                 async with sem:
                     res = await self._checker.check(item.uid)
-                    if res.outcome != CheckOutcome.LIVE:
-                        return
-                    verified = await self._checker.verify_live(item.uid)
-                    if verified.outcome != CheckOutcome.LIVE:
-                        return
-                    fb_name, avatar_url = await self._checker.fetch_profile_info(item.uid)
+                if res.outcome != CheckOutcome.LIVE:
+                    return
+                verified = await self._checker.verify_live(item.uid)
+                if verified.outcome != CheckOutcome.LIVE:
+                    return
+                fb_name, avatar_url = await self._checker.fetch_profile_info(item.uid)
                 now = datetime.now(UTC)
                 item.last_checked_at = now
                 if self._lock is not None:
@@ -491,6 +491,12 @@ class WatchService:
             raise ValueError("Không tìm thấy kèo trong chat này.")
         item.is_hidden = hidden
         return item
+
+    async def save_avatar_file_id(self, item: WatchItem, file_id: str) -> None:
+        if not file_id or item.avatar_file_id == file_id:
+            return
+        item.avatar_file_id = file_id
+        await self._repo.update(item)
 
     async def update_watch(
         self,
@@ -567,21 +573,21 @@ class WatcherScanService:
             try:
                 async with sem:
                     res = await self._checker.check(uid)
-                    if res.outcome != CheckOutcome.LIVE:
-                        # Skip redundant Redis writes when item is still DIE or ERROR
-                        return 0
+                if res.outcome != CheckOutcome.LIVE:
+                    # Skip redundant Redis writes when item is still DIE or ERROR
+                    return 0
 
-                    # Layer-2 double verification to guarantee 0% false LIVE alerts
-                    verified = await self._checker.verify_live(uid)
-                    if verified.outcome != CheckOutcome.LIVE:
-                        logger.info(
-                            "watcher_double_verify_rejected uid=%s watch_ids=%s second_outcome=%s",
-                            uid,
-                            [it.id for it in uid_items],
-                            verified.outcome.value,
-                        )
-                        return 0
-                    fb_name, avatar_url = await self._checker.fetch_profile_info(uid)
+                # Layer-2 double verification outside semaphore so verify_delay never blocks DIE scans
+                verified = await self._checker.verify_live(uid)
+                if verified.outcome != CheckOutcome.LIVE:
+                    logger.info(
+                        "watcher_double_verify_rejected uid=%s watch_ids=%s second_outcome=%s",
+                        uid,
+                        [it.id for it in uid_items],
+                        verified.outcome.value,
+                    )
+                    return 0
+                fb_name, avatar_url = await self._checker.fetch_profile_info(uid)
 
                 now = datetime.now(UTC)
                 count = 0

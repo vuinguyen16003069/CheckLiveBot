@@ -283,3 +283,201 @@ async def test_telegram_bulk_notifier_respects_retry_after_cooldown() -> None:
     await notifier.update_progress(10, 20, "progress 2")
     # Second call skipped during flood-wait cooldown
     assert bot.edit_message_text.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_notifier_send_document_retries_on_retry_after() -> None:
+    from aiogram.exceptions import TelegramRetryAfter
+    from aiogram.methods import SendDocument
+
+    bot = AsyncMock(spec=Bot)
+    bot.send_document.side_effect = [
+        TelegramRetryAfter(
+            method=SendDocument(chat_id=10, document="f"),
+            message="Too Many Requests",
+            retry_after=0,
+        ),
+        None,
+    ]
+    notifier = TelegramBulkNotifier(bot, job_id="j9")
+    await notifier.send_bulk_results(10, "cap", ["10001"], [], [], "j9", status_message_id=None)
+    assert bot.send_document.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_single_uid_profile_fetches_on_live_and_cancels_on_die() -> None:
+    cancelled_uids: list[str] = []
+
+    class _SlowProfileChecker(_StubChecker):
+        async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+            if self._outcomes.get(uid) == CheckOutcome.LIVE:
+                return "Mark Zuckerberg", "https://scontent.xx.fbcdn.net/zuck.jpg"
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                cancelled_uids.append(uid)
+                raise
+            return None, None
+
+    svc = BulkCheckService(
+        checker=_SlowProfileChecker({"4": CheckOutcome.LIVE, "8": CheckOutcome.DIE}, delay=0.01)
+    )
+    assert svc.max_bulk_uids == 50000
+
+    with pytest.raises(ValueError, match="UID không hợp lệ"):
+        await svc.check_single_uid_profile("not-valid")
+
+    uid_live, out_live, name_live, avt_live = await svc.check_single_uid_profile("4")
+    assert (uid_live, out_live, name_live, avt_live) == (
+        "4",
+        CheckOutcome.LIVE,
+        "Mark Zuckerberg",
+        "https://scontent.xx.fbcdn.net/zuck.jpg",
+    )
+
+    # DIE must cancel in-flight profile fetch immediately instead of waiting 5s
+    uid_die, out_die, name_die, avt_die = await asyncio.wait_for(
+        svc.check_single_uid_profile("8"), timeout=1.0
+    )
+    assert (uid_die, out_die, name_die, avt_die) == ("8", CheckOutcome.DIE, None, None)
+    assert cancelled_uids == ["8"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() -> None:
+    from unittest.mock import MagicMock
+
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.filters import CommandObject
+    from aiogram.methods import SendPhoto
+    from aiogram.types import Message
+
+    from src.modules.bulk.handlers import (
+        CancelBulkCallback,
+        RecheckSingleCallback,
+        create_bulk_router,
+    )
+
+    checker = _StubChecker({"4": CheckOutcome.LIVE, "8": CheckOutcome.DIE}, delay=0.05)
+    svc = BulkCheckService(checker=checker, concurrency=5)
+    router = create_bulk_router(svc)
+
+    msg_handlers = {h.callback.__name__: h.callback for h in router.message.handlers}
+    cb_handlers = {h.callback.__name__: h.callback for h in router.callback_query.handlers}
+
+    def _make_msg(text: str = "", chat_id: int = 100) -> MagicMock:
+        m = MagicMock(spec=Message)
+        m.chat = MagicMock(id=chat_id)
+        m.text = text
+        m.photo = None
+        m.bot = AsyncMock(spec=Bot)
+        m.answer = AsyncMock(return_value=MagicMock(message_id=99, delete=AsyncMock()))
+        m.answer_photo = AsyncMock(return_value=MagicMock(message_id=100))
+        m.edit_text = AsyncMock()
+        m.edit_caption = AsyncMock()
+        m.edit_reply_markup = AsyncMock()
+        return m
+
+    state = MagicMock()
+    state.clear = AsyncMock()
+    state.get_state = AsyncMock(return_value=None)
+
+    # 1. /check with no args shows instructions
+    m_empty = _make_msg()
+    await msg_handlers["cmd_check"](
+        m_empty, CommandObject(prefix="/", command="check", args=""), state
+    )
+    state.clear.assert_awaited_once()
+    assert "Kiểm tra nhanh" in m_empty.answer.call_args.args[0]
+
+    # 2. /check with LIVE UID sends photo; if photo fails with TelegramBadRequest, falls back to text
+    m_live = _make_msg()
+    await msg_handlers["cmd_check"](
+        m_live, CommandObject(prefix="/", command="check", args="4"), state
+    )
+    m_live.answer_photo.assert_awaited_once()
+
+    m_fallback = _make_msg()
+    m_fallback.answer_photo.side_effect = TelegramBadRequest(
+        method=SendPhoto(chat_id=100, photo="u"), message="bad photo"
+    )
+    await msg_handlers["cmd_check"](
+        m_fallback, CommandObject(prefix="/", command="check", args="4"), state
+    )
+    m_fallback.answer.assert_awaited_once()
+
+    # 3. /check with invalid UID replies error
+    m_bad = _make_msg()
+    await msg_handlers["cmd_check"](
+        m_bad, CommandObject(prefix="/", command="check", args="abc"), state
+    )
+    assert "❌" in m_bad.answer.call_args.args[0]
+
+    # 4. cb_recheck_single edits caption on photo message and text on plain message
+    q_photo = MagicMock()
+    q_photo.message = _make_msg()
+    q_photo.message.photo = [MagicMock()]
+    q_photo.answer = AsyncMock()
+    await cb_handlers["cb_recheck_single"](q_photo, RecheckSingleCallback(uid="4"))
+    q_photo.message.edit_caption.assert_awaited_once()
+    q_photo.answer.assert_awaited_once()
+
+    q_text = MagicMock()
+    q_text.message = _make_msg()
+    q_text.answer = AsyncMock()
+    await cb_handlers["cb_recheck_single"](q_text, RecheckSingleCallback(uid="8"))
+    q_text.message.edit_text.assert_awaited_once()
+
+    # 5. handle_smart_plain_text: ignores plain text, checks 1 UID, starts bulk on 2+ UIDs
+    m_chat = _make_msg("hello group chat")
+    await msg_handlers["handle_smart_plain_text"](m_chat, state)
+    m_chat.answer.assert_not_awaited()
+
+    m_multi = _make_msg("4\n8\n", chat_id=200)
+    state.get_state = AsyncMock(return_value="ListLookupStates:waiting_uid")
+    await msg_handlers["handle_smart_plain_text"](m_multi, state)
+    assert svc.is_chat_busy(200) is True
+
+    # 6. cb_cancel_bulk cancels active job and handles already-finished job
+    cancel_markup = m_multi.answer.call_args.kwargs["reply_markup"]
+    active_job_id = CancelBulkCallback.unpack(
+        cancel_markup.inline_keyboard[0][0].callback_data
+    ).job_id
+    q_cancel = MagicMock()
+    q_cancel.message = _make_msg(chat_id=200)
+    q_cancel.answer = AsyncMock()
+    await cb_handlers["cb_cancel_bulk"](q_cancel, CancelBulkCallback(job_id=active_job_id))
+    assert svc.is_chat_busy(200) is False
+    q_cancel.message.edit_text.assert_awaited_once()
+
+    q_cancel_again = MagicMock()
+    q_cancel_again.message = _make_msg(chat_id=200)
+    q_cancel_again.answer = AsyncMock()
+    await cb_handlers["cb_cancel_bulk"](q_cancel_again, CancelBulkCallback(job_id=active_job_id))
+    q_cancel_again.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
+
+    # 7. handle_txt_document: ignores non-.txt, rejects >10MB, processes valid .txt (>64KB to_thread)
+    m_doc_skip = _make_msg()
+    m_doc_skip.document = MagicMock(file_name="photo.png", file_size=100)
+    await msg_handlers["handle_txt_document"](m_doc_skip, m_doc_skip.bot, state)
+    m_doc_skip.answer.assert_not_awaited()
+
+    m_doc_big = _make_msg()
+    m_doc_big.document = MagicMock(file_name="huge.txt", file_size=11 * 1024 * 1024)
+    await msg_handlers["handle_txt_document"](m_doc_big, m_doc_big.bot, state)
+    assert "quá lớn" in m_doc_big.answer.call_args.args[0]
+
+    m_doc_ok = _make_msg(chat_id=300)
+    m_doc_ok.document = MagicMock(file_name="uids.txt", file_size=70000)
+
+    async def _fake_download(_doc: object, destination: object) -> None:
+        import io
+
+        assert isinstance(destination, io.BytesIO)
+        payload = ("\n".join(str(10000000000 + i) for i in range(6000)) + "\n").encode("utf-8")
+        destination.write(payload)
+
+    m_doc_ok.bot.download = AsyncMock(side_effect=_fake_download)
+    await msg_handlers["handle_txt_document"](m_doc_ok, m_doc_ok.bot, state)
+    assert svc.is_chat_busy(300) is True
+    await svc.close()

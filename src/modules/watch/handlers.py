@@ -56,18 +56,32 @@ class TelegramWatchNotifier:
             await self._bot.send_message(chat_id=item.chat_id, text=text, reply_markup=markup)
 
         async def _send() -> None:
-            if item.avatar_url:
+            photo = item.avatar_file_id or item.avatar_url
+            if photo:
                 try:
-                    await self._bot.send_photo(
+                    sent = await self._bot.send_photo(
                         chat_id=item.chat_id,
-                        photo=item.avatar_url,
+                        photo=photo,
                         caption=text,
                         reply_markup=markup,
                         has_spoiler=item.is_hidden,
                     )
+                    if not item.avatar_file_id and sent.photo:
+                        item.avatar_file_id = sent.photo[-1].file_id
                     return
                 except TelegramBadRequest:
-                    pass
+                    if item.avatar_file_id and item.avatar_url:
+                        with contextlib.suppress(TelegramBadRequest):
+                            sent = await self._bot.send_photo(
+                                chat_id=item.chat_id,
+                                photo=item.avatar_url,
+                                caption=text,
+                                reply_markup=markup,
+                                has_spoiler=item.is_hidden,
+                            )
+                            if sent.photo:
+                                item.avatar_file_id = sent.photo[-1].file_id
+                            return
             await _send_text()
 
         try:
@@ -142,7 +156,9 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 return
             with contextlib.suppress(TelegramBadRequest):
                 await message.delete()
-            await _answer_watch_card(message, item, reply_markup=_back_keyboard(item))
+            await _answer_watch_card(
+                message, item, reply_markup=_back_keyboard(item), watch_service=watch_service
+            )
             return
 
         async def _attach_keyboard() -> Message:
@@ -224,6 +240,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
             item,
             title="✅ Đã thêm UID thành công!",
             reply_markup=build_watch_keyboard(item),
+            watch_service=watch_service,
         )
 
     @router.message(WizardStates.waiting_uid, F.text)
@@ -350,7 +367,9 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 f"📭 Không tìm thấy kèo nào có UID <code>{uid}</code> trong danh sách."
             )
             return
-        await _answer_watch_card(message, item, reply_markup=_back_keyboard(item))
+        await _answer_watch_card(
+            message, item, reply_markup=_back_keyboard(item), watch_service=watch_service
+        )
 
     @router.message(Command("stats"))
     async def cmd_stats(message: Message, state: FSMContext) -> None:
@@ -373,6 +392,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 item,
                 title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!",
                 reply_markup=build_watch_keyboard(item),
+                watch_service=watch_service,
             )
 
     @router.callback_query(QuickWatchCallback.filter())
@@ -653,16 +673,21 @@ async def _answer_watch_card(
     *,
     title: str | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
+    watch_service: WatchService | None = None,
 ) -> None:
     text = format_watch_card(item, title=title)
-    if item.status != WatchStatus.DIE and item.avatar_url:
+    photo = item.avatar_file_id or item.avatar_url
+    if item.status != WatchStatus.DIE and photo:
         try:
-            await message.answer_photo(
-                photo=item.avatar_url,
+            sent = await message.answer_photo(
+                photo=photo,
                 caption=text,
                 reply_markup=reply_markup,
                 has_spoiler=item.is_hidden,
             )
+            if not item.avatar_file_id and sent.photo and watch_service is not None:
+                with contextlib.suppress(Exception):
+                    await watch_service.save_avatar_file_id(item, sent.photo[-1].file_id)
             return
         except TelegramBadRequest:
             pass

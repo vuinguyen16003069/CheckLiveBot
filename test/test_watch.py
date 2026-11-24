@@ -286,6 +286,9 @@ async def test_watch_service_lifecycle_pagination_recheck_and_isolation() -> Non
 
     w1 = await svc.add_watch(chat_id=100, user_id=1, raw_args="100001 | Khách 1 | 50k")
     w2 = await svc.add_watch(chat_id=100, user_id=1, raw_args="100002 | Khách 2 | 80k")
+    await svc.save_avatar_file_id(w2, "AgACAgUAAxkBAA_cached_file_id")
+    reloaded_w2 = await svc.get_watch(chat_id=100, watch_id=w2.id)
+    assert reloaded_w2.avatar_file_id == "AgACAgUAAxkBAA_cached_file_id"
     w3 = await svc.add_watch(chat_id=100, user_id=1, raw_args="100003 | Khách 3 | 90k")
     assert (w1.status, w2.status, w3.status) == (
         WatchStatus.DIE,
@@ -600,4 +603,265 @@ async def test_list_lookup_filter_ignores_plain_chat_and_multiline() -> None:
     assert await _matches("https://fb.com/profile.php?id=100012345678901") is True
     assert await _matches("xin chào mọi người") is False
     assert await _matches("10001\n10002") is False
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_telegram_watch_notifier_photo_file_id_fallback_retry_and_forbidden() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram import Bot
+    from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+    from aiogram.methods import SendMessage, SendPhoto
+
+    from src.modules.watch.handlers import TelegramWatchNotifier
+
+    # 1. Sends photo via avatar_url and caches returned file_id onto item
+    bot = AsyncMock(spec=Bot)
+    bot.send_photo.return_value = MagicMock(photo=[MagicMock(file_id="cached_fid_1")])
+    notifier = TelegramWatchNotifier(bot)
+    item = WatchItem(
+        id=1,
+        chat_id=10,
+        owner_user_id=20,
+        uid="4",
+        fb_name="Mark Zuckerberg",
+        avatar_url="https://scontent.xx.fbcdn.net/zuck.jpg",
+        note="VIP",
+        price="50k",
+        status=WatchStatus.LIVE,
+    )
+    await notifier.notify_live(item)
+    bot.send_photo.assert_awaited_once()
+    assert item.avatar_file_id == "cached_fid_1"
+
+    # 2. If cached file_id fails with TelegramBadRequest, falls back to avatar_url then text
+    bot2 = AsyncMock(spec=Bot)
+    bad_req = TelegramBadRequest(method=SendPhoto(chat_id=10, photo="x"), message="wrong file id")
+    bot2.send_photo.side_effect = [bad_req, bad_req]
+    notifier2 = TelegramWatchNotifier(bot2)
+    await notifier2.notify_live(item)
+    assert bot2.send_photo.await_count == 2
+    bot2.send_message.assert_awaited_once()
+
+    # 3. Retries once on TelegramRetryAfter
+    bot3 = AsyncMock(spec=Bot)
+    bot3.send_message.side_effect = [
+        TelegramRetryAfter(
+            method=SendMessage(chat_id=10, text="hi"),
+            message="Too Many Requests",
+            retry_after=0,
+        ),
+        None,
+    ]
+    item_no_avt = item.model_copy(update={"avatar_url": "", "avatar_file_id": ""})
+    await TelegramWatchNotifier(bot3).notify_live(item_no_avt)
+    assert bot3.send_message.await_count == 2
+
+    # 4. Swallows TelegramForbiddenError cleanly without raising
+    bot4 = AsyncMock(spec=Bot)
+    bot4.send_message.side_effect = TelegramForbiddenError(
+        method=SendMessage(chat_id=10, text="hi"), message="bot was blocked"
+    )
+    await TelegramWatchNotifier(bot4).notify_live(item_no_avt)
+
+
+@pytest.mark.asyncio
+async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram import Bot
+    from aiogram.filters import CommandObject
+    from aiogram.types import Message
+
+    from src.modules.watch.handlers import create_watch_router
+    from src.modules.watch.ui import (
+        DashboardCallback,
+        ListPageCallback,
+        QuickWatchCallback,
+        WatchActionCallback,
+        WizardCallback,
+    )
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    lock = RedisLock(redis, prefix="test")
+    repo = RedisWatchRepository(redis, prefix="test")
+    checker = _StubChecker({"100050": CheckOutcome.DIE, "100051": CheckOutcome.LIVE})
+    svc = WatchService(repo=repo, checker=checker, lock=lock)
+    router = create_watch_router(svc)
+
+    msg_handlers = {h.callback.__name__: h.callback for h in router.message.handlers}
+    cb_handlers = {h.callback.__name__: h.callback for h in router.callback_query.handlers}
+
+    class _MemFSM:
+        def __init__(self) -> None:
+            self.state: object = None
+            self.data: dict[str, object] = {}
+
+        async def clear(self) -> None:
+            self.state = None
+            self.data.clear()
+
+        async def set_state(self, s: object) -> None:
+            self.state = s
+
+        async def get_state(self) -> object:
+            return self.state
+
+        async def get_data(self) -> dict[str, object]:
+            return dict(self.data)
+
+        async def update_data(self, **kwargs: object) -> None:
+            self.data.update(kwargs)
+
+    bot = AsyncMock(spec=Bot)
+    bot.me = AsyncMock(return_value=MagicMock(username="checklive_bot"))
+    bot.edit_message_text = AsyncMock()
+
+    def _msg(text: str = "", chat_id: int = 100, photo: object = None) -> MagicMock:
+        m = MagicMock(spec=Message)
+        m.chat = MagicMock(id=chat_id)
+        m.from_user = MagicMock(id=1)
+        m.text = text
+        m.photo = photo
+        m.message_id = 50
+        m.answer = AsyncMock(return_value=MagicMock(message_id=51, delete=AsyncMock()))
+        m.answer_photo = AsyncMock(
+            return_value=MagicMock(message_id=52, photo=[MagicMock(file_id="fid_99")])
+        )
+        m.edit_text = AsyncMock()
+        m.edit_caption = AsyncMock()
+        m.delete = AsyncMock()
+        return m
+
+    state = _MemFSM()
+
+    # 1. /help, /cancel, /stats, /list, reply shortcuts & dashboard callbacks
+    m_help = _msg()
+    await msg_handlers["cmd_help"](m_help, state)
+    assert "Hướng dẫn sử dụng" in m_help.answer.call_args.args[0]
+
+    m_cancel = _msg()
+    await msg_handlers["cmd_cancel"](m_cancel, state)
+    assert "Đã hủy" in m_cancel.answer.call_args.args[0]
+
+    m_stats = _msg()
+    await msg_handlers["cmd_stats"](m_stats, state)
+    assert "Thống kê" in m_stats.answer.call_args.args[0]
+
+    for btn in ("➕ Lên kèo", "📋 Danh sách", "🔎 Check nhanh", "📊 Thống kê"):
+        m_sc = _msg(btn)
+        await msg_handlers["handle_reply_shortcuts"](m_sc, state, bot)
+        m_sc.answer.assert_awaited()
+
+    q_db = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_dashboard"](q_db, DashboardCallback(action="stats"), state, bot)
+    q_db.answer.assert_awaited_once()
+
+    # 2. /add valid, duplicate, invalid + /start deep link w_<id> (found & not found)
+    m_add = _msg()
+    await msg_handlers["cmd_add"](
+        m_add, CommandObject(prefix="/", command="add", args="100051 | VIP | 100k | 282"), state
+    )
+    m_add.answer_photo.assert_awaited_once()
+
+    m_dup = _msg()
+    await msg_handlers["cmd_add"](
+        m_dup, CommandObject(prefix="/", command="add", args="100051 | Trùng"), state
+    )
+    assert "đã tồn tại" in m_dup.answer.call_args.args[0]
+
+    m_bad = _msg()
+    await msg_handlers["cmd_add"](
+        m_bad, CommandObject(prefix="/", command="add", args="not_a_uid"), state
+    )
+    assert "❌" in m_bad.answer.call_args.args[0]
+
+    m_deep_ok = _msg()
+    await msg_handlers["cmd_start"](
+        m_deep_ok, CommandObject(prefix="/", command="start", args="w_1"), state
+    )
+    m_deep_ok.answer_photo.assert_awaited_once()
+
+    m_deep_404 = _msg()
+    await msg_handlers["cmd_start"](
+        m_deep_404, CommandObject(prefix="/", command="start", args="w_999"), state
+    )
+    assert "Không tìm thấy" in m_deep_404.answer.call_args.args[0]
+
+    # 3. Full 4-step Wizard flow (invalid UID -> duplicate UID -> valid UID -> note -> pick_price -> skip_faq)
+    m_w = _msg()
+    await msg_handlers["cmd_add"](m_w, CommandObject(prefix="/", command="add", args=""), state)
+    await msg_handlers["wizard_step_uid"](_msg("bad_uid"), state, bot)
+    await msg_handlers["wizard_step_uid"](_msg("100051"), state, bot)
+    await msg_handlers["wizard_step_uid"](_msg("100050"), state, bot)
+    await msg_handlers["wizard_step_note"](_msg("Khách mới"), state, bot)
+
+    q_wz = MagicMock(message=_msg(), from_user=MagicMock(id=1), answer=AsyncMock())
+    await cb_handlers["cb_wizard"](q_wz, WizardCallback(action="pick_price", value="200k"), state)
+    await cb_handlers["cb_wizard"](q_wz, WizardCallback(action="prev", value="2"), state)
+    await msg_handlers["wizard_step_note"](_msg("Khách mới v2"), state, bot)
+    await msg_handlers["wizard_step_price"](_msg("300k"), state, bot)
+    await msg_handlers["wizard_step_faq"](_msg("282"), state, bot)
+
+    created = await svc.find_by_uid(100, "100050")
+    assert created is not None
+    assert (created.note, created.price, created.faq) == ("Khách mới v2", "300k", "282")
+
+    # 4. List lookup (found & not found), cb_list_page (text & photo), cb_quick_watch, cb_recheck_all
+    m_lu_ok = _msg("100050")
+    await msg_handlers["handle_list_lookup"](m_lu_ok)
+    m_lu_ok.answer.assert_awaited_once()
+
+    m_lu_miss = _msg("999999999")
+    await msg_handlers["handle_list_lookup"](m_lu_miss)
+    assert "Không tìm thấy" in m_lu_miss.answer.call_args.args[0]
+
+    q_lp_photo = MagicMock(message=_msg(photo=[MagicMock()]), answer=AsyncMock())
+    await cb_handlers["cb_list_page"](
+        q_lp_photo, ListPageCallback(status="ALL", page=1), state, bot
+    )
+    q_lp_photo.message.answer.assert_awaited_once()
+
+    q_qw_dup = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_quick_watch"](q_qw_dup, QuickWatchCallback(uid="100050"), state)
+    q_qw_dup.message.answer.assert_awaited_once()
+
+    q_qw_new = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_quick_watch"](q_qw_new, QuickWatchCallback(uid="100099"), state)
+    q_qw_new.answer.assert_awaited_once()
+
+    checker.mapping["100050"] = CheckOutcome.LIVE
+    checker.verify_mapping["100050"] = (CheckOutcome.LIVE, "OK")
+    q_ra = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_recheck_all"](q_ra)
+    q_ra.message.answer_photo.assert_awaited_once()
+
+    # 5. cb_watch_action: open, hide, show, done, cancel, continue, edit + cancel, delete + cancel + confirm, invalid
+    for act in ("open", "hide", "show", "done", "cancel", "continue", "delete", "delete_cancel"):
+        q_act = MagicMock(message=_msg(photo=[MagicMock()]), answer=AsyncMock())
+        await cb_handlers["cb_watch_action"](
+            q_act, WatchActionCallback(action=act, watch_id=created.id), state
+        )
+        q_act.message.edit_caption.assert_awaited_once()
+
+    q_edit = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_watch_action"](
+        q_edit, WatchActionCallback(action="edit", watch_id=created.id), state
+    )
+    q_edit_cancel = MagicMock(message=_msg(), from_user=MagicMock(id=1), answer=AsyncMock())
+    await cb_handlers["cb_wizard"](q_edit_cancel, WizardCallback(action="cancel"), state)
+
+    q_bad_act = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_watch_action"](
+        q_bad_act, WatchActionCallback(action="unknown", watch_id=created.id), state
+    )
+    assert q_bad_act.answer.call_args.kwargs.get("show_alert") is True
+
+    q_del = MagicMock(message=_msg(), answer=AsyncMock())
+    await cb_handlers["cb_watch_action"](
+        q_del, WatchActionCallback(action="delete_confirm", watch_id=created.id), state
+    )
+    assert await svc.find_by_uid(100, "100050") is None
+
     await redis.aclose()

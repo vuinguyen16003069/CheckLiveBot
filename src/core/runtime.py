@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import sys
+import time
 from typing import Any
 
 from aiogram import Bot, Dispatcher
@@ -41,14 +42,16 @@ async def run_watcher_loop(
     delay = max(3, interval_seconds)
     logger.info("watcher_loop_started interval_seconds=%s", delay)
     while not stop_event.is_set():
+        started = time.monotonic()
         try:
             await scanner.scan_once()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.warning("watcher_scan_error error=%s", exc)
+        remaining = max(1.0, delay - (time.monotonic() - started))
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            await asyncio.wait_for(stop_event.wait(), timeout=remaining)
     logger.info("watcher_loop_stopped")
 
 

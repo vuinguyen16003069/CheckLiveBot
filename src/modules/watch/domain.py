@@ -23,6 +23,7 @@ class WatchItem(BaseModel):
     uid: str
     fb_name: str = ""
     avatar_url: str = ""
+    avatar_file_id: str = ""
     note: str
     price: str
     faq: str = ""
