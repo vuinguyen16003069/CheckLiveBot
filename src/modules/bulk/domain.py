@@ -108,7 +108,7 @@ def format_single_check(
 ) -> str:
     uid_html = f"<code>{html.escape(uid)}</code>"
     if outcome == CheckOutcome.LIVE:
-        status_line = f"✅ <b>UID</b> {uid_html} - <b>LIVE</b> ✅"
+        status_line = f"✅ <b>UID</b> {uid_html} - <b>LIVE</b>"
         name_display = html.escape(fb_name) if fb_name else "Không công khai"
         return (
             f"🔎 <b>Kiểm tra nhanh UID</b>\n\n{status_line}\n👤 <b>Tên Facebook:</b> {name_display}"
@@ -116,7 +116,7 @@ def format_single_check(
     if outcome == CheckOutcome.DIE:
         return (
             f"🔎 <b>Kiểm tra nhanh UID</b>\n\n"
-            f"❌ <b>UID</b> {uid_html} - <b>DIE</b> 💀\n"
+            f"❌ <b>UID</b> {uid_html} - <b>DIE</b>\n"
             f"👤 <b>Tên Facebook:</b> UID DIE"
         )
     return (

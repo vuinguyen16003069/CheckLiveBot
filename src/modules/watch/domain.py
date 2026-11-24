@@ -119,9 +119,9 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
     price_val = _spoiler(html.escape(_format_price(item.price)), item.is_hidden)
 
     if item.status == WatchStatus.LIVE:
-        uid_line = f"✅ <b>UID</b> {uid_val} - <b>đã Sống lại</b> ✅"
+        uid_line = f"✅ <b>UID</b> {uid_val} - <b>đã Sống lại</b>"
     elif item.status == WatchStatus.DIE:
-        uid_line = f"❌ <b>UID</b> {uid_val} - <b>DIE</b> 💀"
+        uid_line = f"❌ <b>UID</b> {uid_val} - <b>DIE</b>"
     elif item.status == WatchStatus.DONE:
         uid_line = f"✅ <b>UID</b> {uid_val} - <b>DONE</b>"
     else:
