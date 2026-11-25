@@ -235,7 +235,7 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
         total_items=1,
         bot_username="my_checklive_bot",
     )
-    assert "abc@\u200bgmail.com" in list_email
+    assert "abc@\u2060gmail.\u2060com" in list_email
 
     del_kb = build_delete_confirm_keyboard(7)
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])

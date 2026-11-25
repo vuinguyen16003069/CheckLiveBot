@@ -177,8 +177,8 @@ def _format_list_note(note: str, max_len: int = 120) -> str:
     cleaned = " ".join(note.split())
     if len(cleaned) > max_len:
         cleaned = cleaned[: max_len - 1].rstrip() + "…"
-    # Insert zero-width space after '@' so Telegram does not turn emails into blue links next to UID
-    return html.escape(cleaned).replace("@", "@\u200b")
+    # Word Joiner (\u2060) prevents Telegram from auto-linking emails/domains AND forbids mid-email line breaks
+    return html.escape(cleaned).replace("@", "@\u2060").replace(".", ".\u2060")
 
 
 def format_watch_list(
