@@ -173,14 +173,7 @@ def format_live_notification(item: WatchItem) -> str:
     return format_watch_card(item, title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!")
 
 
-def _format_list_note(note: str, max_len: int = 42) -> str:
-    cleaned = " ".join(note.split())
-    if len(cleaned) > max_len:
-        cleaned = cleaned[: max_len - 1].rstrip() + "…"
-    return html.escape(cleaned).replace("@", "@\u200b")
-
-
-def _format_list_note(note: str, max_len: int = 42) -> str:
+def _format_list_note(note: str, max_len: int = 120) -> str:
     cleaned = " ".join(note.split())
     if len(cleaned) > max_len:
         cleaned = cleaned[: max_len - 1].rstrip() + "…"
@@ -220,7 +213,7 @@ def format_watch_list(
         else:
             uid_display = f"<code>{escaped_uid}</code>"
         price_display = html.escape(_format_price(item.price))
-        faq_part = f"  <i>[{html.escape(item.faq)}]</i>" if item.faq else ""
+        faq_part = f"  [{html.escape(item.faq)}]" if item.faq else ""
         note_display = _format_list_note(item.note)
         blocks.append(
             f"{badge} <b>#\u200b{item.id}</b> · {uid_display}  •  <b>{price_display}</b>{faq_part}\n"

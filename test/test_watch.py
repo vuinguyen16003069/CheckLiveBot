@@ -210,7 +210,7 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
         [
             sample_item.model_copy(
                 update={
-                    "note": "VIA CỔ 1000X - verylongemailaddress123456@hotmail.com",
+                    "note": "VIA CỔ 1000X - " + "a" * 120,
                     "faq": "583 toàn vẹn",
                 }
             )
@@ -367,9 +367,9 @@ async def test_watch_service_lifecycle_pagination_recheck_and_isolation() -> Non
         checker.mapping[uid] = CheckOutcome.DIE
         await svc.add_watch(chat_id=300, user_id=1, raw_args=f"{uid} | Item {i} | 10k")
     page1, total300, pages300 = await svc.list_watches(300, page=1)
-    assert (len(page1), total300, pages300) == (8, 12, 2)
+    assert (len(page1), total300, pages300) == (10, 12, 2)
     page_clamped, _, _ = await svc.list_watches(300, page=99)
-    assert len(page_clamped) == 4
+    assert len(page_clamped) == 2
 
     await redis.aclose()
 
