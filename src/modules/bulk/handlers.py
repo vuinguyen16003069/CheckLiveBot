@@ -113,7 +113,14 @@ class TelegramBulkNotifier:
 
 def build_single_check_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboardMarkup:
     row: list[InlineKeyboardButton] = []
-    if outcome != CheckOutcome.LIVE:
+    if outcome == CheckOutcome.LIVE:
+        row.append(
+            InlineKeyboardButton(
+                text="🔗 Mở Facebook",
+                url=f"https://www.facebook.com/profile.php?id={uid}",
+            )
+        )
+    else:
         row.append(
             InlineKeyboardButton(
                 text="➕ Lên kèo UID này",

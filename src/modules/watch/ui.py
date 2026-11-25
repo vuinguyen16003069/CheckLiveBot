@@ -152,13 +152,19 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
     return f"{header}\n{body}\n👉 {prompts[step]}"
 
 
+_EDIT_WATCH_RE = re.compile(r"SỬA KÈO #(\d+)")
+_UID_DRAFT_RE = re.compile(r"UID:\s*([A-Za-z0-9._-]{1,50})")
+_NOTE_DRAFT_RE = re.compile(r"Ghi chú:\s*(.+)")
+_PRICE_DRAFT_RE = re.compile(r"Giá:\s*(.+)")
+
+
 def recover_draft_from_text(text: str | None) -> DealDraft:
     if not text:
         return DealDraft()
-    edit_m = re.search(r"SỬA KÈO #(\d+)", text)
-    uid_m = re.search(r"UID:\s*([A-Za-z0-9._-]{1,50})", text)
-    note_m = re.search(r"Ghi chú:\s*(.+)", text)
-    price_m = re.search(r"Giá:\s*(.+)", text)
+    edit_m = _EDIT_WATCH_RE.search(text)
+    uid_m = _UID_DRAFT_RE.search(text)
+    note_m = _NOTE_DRAFT_RE.search(text)
+    price_m = _PRICE_DRAFT_RE.search(text)
     return DealDraft(
         uid=uid_m.group(1).strip() if uid_m else "",
         note=note_m.group(1).strip() if note_m else "",
@@ -173,15 +179,23 @@ def build_watch_keyboard(
     back_status: str | None = "ALL",
     back_page: int = 1,
 ) -> InlineKeyboardMarkup:
+    toggle_btn = (
+        InlineKeyboardButton(
+            text="🐵 Hiện thông tin",
+            callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
+        )
+        if item.is_hidden
+        else InlineKeyboardButton(
+            text="🙈 Ẩn thông tin",
+            callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
+        )
+    )
     rows: list[list[InlineKeyboardButton]] = [
         [
+            toggle_btn,
             InlineKeyboardButton(
-                text="🙈 Ẩn thông tin",
-                callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🐵 Hiện thông tin",
-                callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
+                text="🔗 Mở Facebook",
+                url=f"https://www.facebook.com/profile.php?id={item.uid}",
             ),
         ],
     ]

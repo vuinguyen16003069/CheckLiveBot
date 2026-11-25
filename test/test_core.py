@@ -250,6 +250,11 @@ async def test_redis_lock_and_throttling_middleware(monkeypatch: pytest.MonkeyPa
     await lock.release_lock("notify:1")
     assert await lock.acquire_lock("notify:1", 60) is True
 
+    # Token-safe release_lock must NOT delete a lock overwritten by another owner
+    await redis.set("test:lock:notify:1", "other-owner-token", ex=60)
+    await lock.release_lock("notify:1")
+    assert await redis.get("test:lock:notify:1") == "other-owner-token"
+
     # Unlimited mode (limit=0)
     unlimited = ThrottlingMiddleware(limit_per_minute=0)
     assert all(unlimited.check_rate_limit(1) for _ in range(50))
@@ -828,6 +833,27 @@ async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_ear
     assert parse_public_profile_html("<title>John Smith - Home | Facebook</title>") == (
         "John Smith",
         None,
+    )
+    # Apostrophe inside double-quoted og:title must not be truncated
+    assert parse_public_profile_html('<meta property="og:title" content="Conan O\'Brien" />') == (
+        "Conan O'Brien",
+        None,
+    )
+
+    # _read_head must NOT stop early on og:image:alt before actual og:image arrives
+    alt_first_resp = _ChunkResp(
+        [
+            b'<meta property="og:title" content="Mark" />'
+            b'<meta property="og:image:alt" content="Mark" />',
+            b'<meta property="og:image" content="https://scontent.xx.fbcdn.net/real.jpg" />',
+            b"TRAILING</head>",
+        ]
+    )
+    alt_body = await CurlCffiFacebookChecker._read_head(alt_first_resp)  # type: ignore[reportPrivateUsage]
+    assert alt_first_resp.yielded == 2
+    assert parse_public_profile_html(alt_body) == (
+        "Mark",
+        "https://scontent.xx.fbcdn.net/real.jpg",
     )
 
     # 5. close() cancels in-flight check & profile tasks cleanly

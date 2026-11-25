@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any
 from urllib.parse import urlparse
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
 
 def normalize_redis_url(url: str) -> str:
@@ -33,20 +35,39 @@ def create_redis_client(url: str) -> Redis:
 
 
 class RedisLock:
-    """Lightweight Redis distributed lock for deduplicating LIVE notifications."""
+    """Lightweight token-safe Redis distributed lock."""
 
     def __init__(self, redis: Redis, prefix: str = "checklivebot") -> None:
         self._redis = redis
         self._prefix = prefix
+        self._tokens: dict[str, str] = {}
 
     async def acquire_lock(self, key: str, ttl_seconds: int) -> bool:
+        token = uuid.uuid4().hex
         acquired = await self._redis.set(
             f"{self._prefix}:lock:{key}",
-            "1",
+            token,
             nx=True,
             ex=ttl_seconds,
         )
-        return bool(acquired)
+        if acquired:
+            self._tokens[key] = token
+            return True
+        return False
 
     async def release_lock(self, key: str) -> None:
-        await self._redis.delete(f"{self._prefix}:lock:{key}")
+        token = self._tokens.pop(key, None)
+        if token is None:
+            return
+        full_key = f"{self._prefix}:lock:{key}"
+        async with self._redis.pipeline(transaction=True) as pipe:
+            try:
+                await pipe.watch(full_key)
+                if await pipe.get(full_key) == token:
+                    pipe.multi()
+                    pipe.delete(full_key)
+                    await pipe.execute()
+                else:
+                    await pipe.unwatch()
+            except WatchError:
+                pass

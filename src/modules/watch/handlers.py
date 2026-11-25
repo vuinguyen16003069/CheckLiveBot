@@ -14,6 +14,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 
@@ -108,25 +109,29 @@ class TelegramWatchNotifier:
 
 def create_watch_router(watch_service: WatchService) -> Router:
     router = Router(name="watch")
+    cached_bot_username: str | None = None
+    bot_username_loaded = False
 
     async def render_list(
         chat_id: int, bot: Bot, status: str = "ALL", page: int = 1
     ) -> tuple[str, InlineKeyboardMarkup]:
+        nonlocal cached_bot_username, bot_username_loaded
         status_filter = None if status == "ALL" else WatchStatus(status)
         items, total, total_pages = await watch_service.list_watches(
             chat_id, status_filter=status_filter, page=page
         )
         page = min(page, total_pages)
-        username = None
-        with contextlib.suppress(Exception):
-            username = (await bot.me()).username
+        if not bot_username_loaded:
+            with contextlib.suppress(Exception):
+                cached_bot_username = (await bot.me()).username
+                bot_username_loaded = True
         text = format_watch_list(
             items,
             status_filter=status,
             page=page,
             total_pages=total_pages,
             total_items=total,
-            bot_username=username,
+            bot_username=cached_bot_username,
         )
         return text, build_list_keyboard(status, page, total_pages)
 
@@ -370,11 +375,15 @@ def create_watch_router(watch_service: WatchService) -> Router:
         msg = await _callback_message(query)
         if msg is None:
             return
+        with contextlib.suppress(TelegramBadRequest):
+            await query.answer("🔄 Đang quét lại các kèo DIE...")
         scanned, turned_live = await watch_service.recheck_chat(msg.chat.id)
         if scanned == 0:
-            await query.answer("📭 Không có kèo DIE nào cần quét lại.")
+            await msg.answer("📭 Không có kèo DIE nào cần quét lại.")
             return
-        await query.answer(f"🔄 Đã quét {scanned} kèo DIE — {len(turned_live)} kèo về LIVE!")
+        if not turned_live:
+            await msg.answer(f"🔄 Đã quét <b>{scanned}</b> kèo DIE — chưa có kèo nào về LIVE.")
+            return
         for item in turned_live:
             await _answer_watch_card(
                 msg,
@@ -478,6 +487,18 @@ def create_watch_router(watch_service: WatchService) -> Router:
                 item = await watch_service.set_hidden(chat_id, watch_id, hidden)
                 text, markup = format_watch_card(item), build_watch_keyboard(item)
                 toast = "🙈 Đã che mờ thông tin." if hidden else "🐵 Đã hiện thông tin."
+                if msg.photo:
+                    with contextlib.suppress(TelegramBadRequest):
+                        await msg.edit_media(
+                            media=InputMediaPhoto(
+                                media=msg.photo[-1].file_id,
+                                caption=text,
+                                has_spoiler=hidden,
+                            ),
+                            reply_markup=markup,
+                        )
+                    await query.answer(toast)
+                    return
             elif action in ("done", "cancel", "continue"):
                 status, toast = {
                     "done": (WatchStatus.DONE, "✅ Đã đánh dấu Done kèo."),

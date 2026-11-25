@@ -38,7 +38,7 @@ class Settings(BaseModel):
     redis_key_prefix: str = Field(default="checklivebot", alias="REDIS_KEY_PREFIX")
 
     concurrency: int = Field(default=100, ge=1, le=500, alias="CONCURRENCY")
-    poll_interval_seconds: int = Field(default=10, ge=3, alias="POLL_INTERVAL_SECONDS")
+    poll_interval_seconds: int = Field(default=15, ge=3, alias="POLL_INTERVAL_SECONDS")
     ttl_die_days: int = Field(default=90, ge=1, alias="TTL_DIE_DAYS")
     ttl_live_days: int = Field(default=60, ge=1, alias="TTL_LIVE_DAYS")
     ttl_done_days: int = Field(default=30, ge=1, alias="TTL_DONE_DAYS")

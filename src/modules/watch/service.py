@@ -441,6 +441,15 @@ class WatchService:
 
     async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
         parsed = parse_add_line(raw_args)
+        add_lock_key = f"add:{chat_id}:{parsed.uid}"
+        lock_acquired = False
+        if self._lock is not None:
+            lock_acquired = await self._lock.acquire_lock(add_lock_key, ttl_seconds=15)
+            if not lock_acquired:
+                existing_now = await self._repo.find_by_uid_with_hidden(chat_id, parsed.uid)
+                if existing_now is not None:
+                    raise DuplicateWatchError(existing_now)
+                raise ValueError("UID này đang được xử lý, vui lòng thử lại sau giây lát.")
 
         async def _count_die() -> int:
             if self._max_active_per_chat > 0:
@@ -484,25 +493,30 @@ class WatchService:
                 profile_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await profile_task
+
+            item = await self._repo.create(
+                chat_id=chat_id,
+                owner_user_id=user_id,
+                uid=parsed.uid,
+                fb_name=fb_name,
+                avatar_url=avatar_url,
+                note=parsed.note,
+                price=parsed.price,
+                faq=parsed.faq,
+                status=initial_status,
+            )
+            item.is_hidden = is_hidden
+            return item
         except BaseException:
             if not profile_task.done():
                 profile_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await profile_task
             raise
-        item = await self._repo.create(
-            chat_id=chat_id,
-            owner_user_id=user_id,
-            uid=parsed.uid,
-            fb_name=fb_name,
-            avatar_url=avatar_url,
-            note=parsed.note,
-            price=parsed.price,
-            faq=parsed.faq,
-            status=initial_status,
-        )
-        item.is_hidden = is_hidden
-        return item
+        finally:
+            if lock_acquired and self._lock is not None:
+                with contextlib.suppress(Exception):
+                    await self._lock.release_lock(add_lock_key)
 
     async def get_watch(self, chat_id: int, watch_id: int) -> WatchItem:
         return await self._require_owned(chat_id, watch_id)

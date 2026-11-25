@@ -217,8 +217,13 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
 
     die_kb = build_watch_keyboard(sample_item)
+    assert [btn.text for btn in die_kb.inline_keyboard[0]] == ["🙈 Ẩn thông tin", "🔗 Mở Facebook"]
+    assert die_kb.inline_keyboard[0][1].url == "https://www.facebook.com/profile.php?id=10001"
     assert [btn.text for btn in die_kb.inline_keyboard[1]] == ["❌ Hủy kèo", "🗑 Xóa"]
     assert [btn.text for btn in die_kb.inline_keyboard[2]] == ["✏️ Sửa", "🔙 Về danh sách"]
+
+    hidden_kb = build_watch_keyboard(sample_item.model_copy(update={"is_hidden": True}))
+    assert hidden_kb.inline_keyboard[0][0].text == "🐵 Hiện thông tin"
 
     live_item = sample_item.model_copy(update={"status": WatchStatus.LIVE})
     live_kb = build_watch_keyboard(live_item)
@@ -863,8 +868,18 @@ async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
     await cb_handlers["cb_recheck_all"](q_ra)
     q_ra.message.answer_photo.assert_awaited_once()
 
-    # 5. cb_watch_action: open, hide, show, done, cancel, continue, edit + cancel, delete + cancel + confirm, invalid
-    for act in ("open", "hide", "show", "done", "cancel", "continue", "delete", "delete_cancel"):
+    # 5. cb_watch_action: hide/show toggle spoiler via edit_media on photo; others edit_caption
+    for act, expected_spoiler in (("hide", True), ("show", False)):
+        m_photo = _msg(photo=[MagicMock(file_id="fid_1")])
+        m_photo.edit_media = AsyncMock()
+        q_act = MagicMock(message=m_photo, answer=AsyncMock())
+        await cb_handlers["cb_watch_action"](
+            q_act, WatchActionCallback(action=act, watch_id=created.id), state
+        )
+        m_photo.edit_media.assert_awaited_once()
+        assert m_photo.edit_media.call_args.kwargs["media"].has_spoiler is expected_spoiler
+
+    for act in ("open", "done", "cancel", "continue", "delete", "delete_cancel"):
         q_act = MagicMock(message=_msg(photo=[MagicMock()]), answer=AsyncMock())
         await cb_handlers["cb_watch_action"](
             q_act, WatchActionCallback(action=act, watch_id=created.id), state
@@ -1069,11 +1084,19 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     await cb_handlers["cb_recheck_all"](q_no_msg)
     q_no_msg.answer.assert_awaited_once()
 
-    # Empty recheck_all on chat with no DIE items
-    q_empty_rc = MagicMock(
-        message=MagicMock(spec=Message, chat=MagicMock(id=9999)), answer=AsyncMock()
-    )
+    # Empty recheck_all on chat with no DIE items answers immediately and notifies in chat
+    m_empty_rc = MagicMock(spec=Message, chat=MagicMock(id=9999), answer=AsyncMock())
+    q_empty_rc = MagicMock(message=m_empty_rc, answer=AsyncMock())
     await cb_handlers["cb_recheck_all"](q_empty_rc)
-    assert "Không có kèo DIE" in q_empty_rc.answer.call_args.args[0]
+    q_empty_rc.answer.assert_awaited_once()
+    assert "Không có kèo DIE" in m_empty_rc.answer.call_args.args[0]
+
+    # Concurrent add_watch with RedisLock prevents duplicate creation
+    add_lock = RedisLock(redis, prefix="edge")
+    locked_svc = WatchService(repo=repo, checker=fail_checker, lock=add_lock)
+    assert await add_lock.acquire_lock("add:55:100099", ttl_seconds=15) is True
+    with pytest.raises(ValueError, match="đang được xử lý"):
+        await locked_svc.add_watch(55, 1, "100099")
+    await add_lock.release_lock("add:55:100099")
 
     await redis.aclose()

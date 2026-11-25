@@ -98,6 +98,9 @@ class _StubBulkNotifier:
         ("https://www.facebook.com/profile.php?id=4", "4"),
         ("https://m.facebook.com/profile.php?foo=1&id=100012345678901&bar=2", "100012345678901"),
         ("HTTPS://FB.COM/PROFILE.PHP?ID=20531316728", "20531316728"),
+        ("https://www.facebook.com/4", "4"),
+        ("https://fb.com/100004030621748/", "100004030621748"),
+        ("https://www.facebook.com/people/Vui-Nguyen/100004030621748/", "100004030621748"),
     ],
 )
 def test_extract_uid_edge_cases(raw: str, expected: str | None) -> None:
@@ -148,7 +151,8 @@ def test_extract_uids_deduplicates_caps_and_formats() -> None:
 
 def test_single_check_markup_and_notifier_behavior() -> None:
     live_kb = build_single_check_markup("4", CheckOutcome.LIVE)
-    assert [b.text for b in live_kb.inline_keyboard[0]] == ["🔄 Check lại"]
+    assert [b.text for b in live_kb.inline_keyboard[0]] == ["🔗 Mở Facebook", "🔄 Check lại"]
+    assert live_kb.inline_keyboard[0][0].url == "https://www.facebook.com/profile.php?id=4"
 
     die_kb = build_single_check_markup("10001", CheckOutcome.DIE)
     assert [b.text for b in die_kb.inline_keyboard[0]] == ["➕ Lên kèo UID này", "🔄 Check lại"]

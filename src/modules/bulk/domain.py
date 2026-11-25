@@ -18,14 +18,27 @@ class BulkSummary(BaseModel):
     elapsed_seconds: float
 
 
+_PROFILE_ID_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", re.IGNORECASE)
+_PEOPLE_UID_RE = re.compile(
+    r"(?:(?:facebook|fb)\.com/people/[^/?#\s]+/)([1-9]\d{0,19})(?:[/?#\s]|$)",
+    re.IGNORECASE,
+)
+_DIRECT_UID_URL_RE = re.compile(
+    r"(?:https?://)?(?:(?:www|m|mbasic)\.)?(?:facebook|fb)\.com/([1-9]\d{0,19})(?:[/?#\s]|$)",
+    re.IGNORECASE,
+)
+_EMBEDDED_UID_RE = re.compile(r"\b([1-9]\d{4,19})\b")
+
+
 def extract_uid(raw: str) -> str | None:
     text = raw.strip()
     if not text:
         return None
     if text.isascii() and text.isdigit():
         return text if len(text) <= 20 and text[0] != "0" else None
-    if match := re.search(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", text, re.IGNORECASE):
-        return match.group(1)
+    for pattern in (_PROFILE_ID_RE, _PEOPLE_UID_RE, _DIRECT_UID_URL_RE):
+        if match := pattern.search(text):
+            return match.group(1)
     return None
 
 
@@ -40,7 +53,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = re.search(r"\b([1-9]\d{4,19})\b", stripped)
+            token_match = _EMBEDDED_UID_RE.search(stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1

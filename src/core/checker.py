@@ -21,12 +21,12 @@ logger = logging.getLogger(__name__)
 def _meta_content(body: str, prop: str) -> str | None:
     escaped = re.escape(prop)
     for pattern in (
-        rf'<meta[^>]+property=["\']{escaped}["\'][^>]+content=["\']([^"\']+)["\']',
-        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{escaped}["\']',
+        rf'<meta[^>]+property=["\']{escaped}["\'][^>]+content=(?P<q>["\'])(?P<val>[^<>]*?)(?P=q)',
+        rf'<meta[^>]+content=(?P<q>["\'])(?P<val>[^<>]*?)(?P=q)[^>]+property=["\']{escaped}["\']',
     ):
         match = re.search(pattern, body, re.IGNORECASE)
         if match:
-            return html.unescape(match.group(1)).strip()
+            return html.unescape(match.group("val")).strip()
     return None
 
 
@@ -291,8 +291,12 @@ class CurlCffiFacebookChecker:
             buf.extend(chunk)
             if b"</head>" in buf or b"</HEAD>" in buf or len(buf) >= 262144:
                 break
-            og_img_idx = buf.rfind(b"og:image")
-            if og_img_idx != -1 and b"og:title" in buf and b">" in buf[og_img_idx:]:
+            og_img_idx = max(buf.rfind(b'og:image"'), buf.rfind(b"og:image'"))
+            if (
+                og_img_idx != -1
+                and (b'og:title"' in buf or b"og:title'" in buf)
+                and b">" in buf[og_img_idx:]
+            ):
                 break
         return buf.decode("utf-8", errors="ignore")
 

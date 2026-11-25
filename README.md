@@ -42,7 +42,7 @@ Telegram Bot kiểm tra trạng thái **LIVE / DIE UID Facebook** tốc độ ca
   - Phân loại chuẩn **3 trạng thái `LIVE` / `DIE` / `ERROR`**: các lỗi Graph API tạm thời / rate-limit (`is_transient=True`, `code` `1/2/4/17/32/341/613`) tự retry đổi proxy và trả `ERROR`, **tuyệt đối không báo nhầm `DIE`**.
 - **Theo dõi kèo tự động `DIE → LIVE`**:
   - Lên kèo bằng **Wizard 4 bước** (`UID → Ghi chú → Giá → FAQ`) hoặc lệnh `/add UID | ghi chú | giá | FAQ`.
-  - Vòng quét nền độ trễ thấp (`10s`), gom trùng UID giữa nhiều chat, **xác minh kép 2 lớp độc lập (`check` + `verify_live`)**, khóa `RedisLock` chống gửi đúp giữa quét nền & quét tay, cô lập lỗi theo từng chat để **không bao giờ mất thông báo LIVE**.
+  - Vòng quét nền độ trễ thấp (`15s`), gom trùng UID giữa nhiều chat, **xác minh kép 2 lớp độc lập (`check` + `verify_live`)**, khóa `RedisLock` chống gửi đúp giữa quét nền & quét tay, cô lập lỗi theo từng chat để **không bao giờ mất thông báo LIVE**.
   - Tối ưu pipeline/`MGET` giảm 2–3× số round-trip Redis (phản hồi nhanh rõ rệt khi dùng Upstash).
 
 ---
@@ -122,7 +122,7 @@ flowchart LR
 
     WR --> WS["WatchService"]
     BR --> BS["BulkCheckService (In-Memory Pool)"]
-    LOOP["watcher-loop (mỗi 10s)"] --> SCAN["WatcherScanService"]
+    LOOP["watcher-loop (mỗi 15s)"] --> SCAN["WatcherScanService"]
 
     WS --> REPO["RedisWatchRepository + RedisLock"]
     SCAN --> REPO
@@ -292,7 +292,7 @@ Toàn bộ cấu hình được định nghĩa và kiểm tra hợp lệ tại [
 | `REDIS_KEY_PREFIX` | Không | `checklivebot` | Chuỗi | Tiền tố key Redis khi chạy nhiều bot chung 1 DB |
 | `PROXY_LIST` | Không | `""` | Phân tách dấu `,` | Danh sách proxy xoay IP (`http://`, `socks5://`, `socks5h://`) |
 | `CONCURRENCY` | Không | `100` | `1 – 500` | Số request check Facebook chạy đồng thời tối đa |
-| `POLL_INTERVAL_SECONDS` | Không | `10` | `>= 3` | Chu kỳ quét nền các kèo `DIE` (giây) |
+| `POLL_INTERVAL_SECONDS` | Không | `15` | `>= 3` | Chu kỳ quét nền các kèo `DIE` (giây) |
 | `TTL_DIE_DAYS` | Không | `90` | `>= 1` | TTL cho kèo đang theo dõi `DIE` và `watches:die` (ngày) |
 | `TTL_LIVE_DAYS` | Không | `60` | `>= 1` | TTL cho kèo đã về `LIVE`, tính từ thời điểm phát hiện LIVE (ngày) |
 | `TTL_DONE_DAYS` | Không | `30` | `>= 1` | TTL cho kèo đã `DONE`, tính từ lúc hoàn tất (ngày) |
