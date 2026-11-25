@@ -53,6 +53,9 @@ class _StubChecker:
             else (None, None)
         )
 
+    async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+        return None
+
     async def close(self) -> None:
         return None
 
@@ -391,12 +394,25 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
     state.clear.assert_awaited_once()
     assert "Kiểm tra nhanh" in m_empty.answer.call_args.args[0]
 
-    # 2. /check with LIVE UID sends photo; if photo fails with TelegramBadRequest, falls back to text
+    # 2. /check with LIVE UID sends photo; if URL fails, retries via downloaded bytes then falls back to text
     m_live = _make_msg()
     await msg_handlers["cmd_check"](
         m_live, CommandObject(prefix="/", command="check", args="4"), state
     )
     m_live.answer_photo.assert_awaited_once()
+
+    m_bytes_ok = _make_msg()
+    m_bytes_ok.answer_photo.side_effect = [
+        TelegramBadRequest(method=SendPhoto(chat_id=100, photo="u"), message="bad url"),
+        MagicMock(message_id=101),
+    ]
+    checker.fetch_avatar_bytes = AsyncMock(return_value=b"\xff\xd8\xff")
+    await msg_handlers["cmd_check"](
+        m_bytes_ok, CommandObject(prefix="/", command="check", args="4"), state
+    )
+    assert m_bytes_ok.answer_photo.await_count == 2
+    m_bytes_ok.answer.assert_not_awaited()
+    checker.fetch_avatar_bytes = AsyncMock(return_value=None)
 
     m_fallback = _make_msg()
     m_fallback.answer_photo.side_effect = TelegramBadRequest(
@@ -428,6 +444,15 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
     q_text.answer = AsyncMock()
     await cb_handlers["cb_recheck_single"](q_text, RecheckSingleCallback(uid="8"))
     q_text.message.edit_text.assert_awaited_once()
+
+    # 4b. cb_recheck_single upgrades text-only message to photo when UID becomes LIVE with avatar
+    q_upgrade = MagicMock()
+    q_upgrade.message = _make_msg()
+    q_upgrade.message.delete = AsyncMock()
+    q_upgrade.answer = AsyncMock()
+    await cb_handlers["cb_recheck_single"](q_upgrade, RecheckSingleCallback(uid="4"))
+    q_upgrade.message.answer_photo.assert_awaited_once()
+    q_upgrade.message.delete.assert_awaited_once()
 
     # 5. handle_smart_plain_text: ignores plain text, checks 1 UID, starts bulk on 2+ UIDs
     m_chat = _make_msg("hello group chat")

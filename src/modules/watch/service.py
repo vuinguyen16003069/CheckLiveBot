@@ -354,9 +354,7 @@ class RedisWatchRepository:
         if not mapping:
             return 0
         raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in mapping.values()])
-        stale_uids = [
-            uid for (uid, _), raw in zip(mapping.items(), raws, strict=True) if not raw
-        ]
+        stale_uids = [uid for (uid, _), raw in zip(mapping.items(), raws, strict=True) if not raw]
         if stale_uids:
             await self._redis.hdel(uid_key, *stale_uids)
         return len(stale_uids)
@@ -606,6 +604,9 @@ class WatchService:
             return
         item.avatar_file_id = file_id
         await self._repo.update(item)
+
+    async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+        return await self._checker.fetch_avatar_bytes(url)
 
     async def update_watch(
         self,

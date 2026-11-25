@@ -99,6 +99,9 @@ class BulkCheckService:
                     await profile_task
             raise
 
+    async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+        return await self._checker.fetch_avatar_bytes(url)
+
     def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int]:
         uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
         if not uids:

@@ -68,6 +68,9 @@ class _StubChecker:
             return "Trang Linh", "https://scontent.xx.fbcdn.net/avatar.jpg"
         return None, None
 
+    async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+        return None
+
     async def close(self) -> None:
         return None
 
@@ -671,6 +674,20 @@ async def test_telegram_watch_notifier_photo_file_id_fallback_retry_and_forbidde
     await notifier2.notify_live(item)
     assert bot2.send_photo.await_count == 2
     bot2.send_message.assert_awaited_once()
+
+    # 2b. If avatar_url fails on Telegram, downloads avatar bytes via checker and sends BufferedInputFile
+    bot2b = AsyncMock(spec=Bot)
+    bot2b.send_photo.side_effect = [
+        bad_req,
+        MagicMock(photo=[MagicMock(file_id="uploaded_fid_2")]),
+    ]
+    dl_checker = _StubChecker({})
+    dl_checker.fetch_avatar_bytes = AsyncMock(return_value=b"\xff\xd8\xff")
+    item_bytes = item.model_copy(update={"avatar_file_id": ""})
+    await TelegramWatchNotifier(bot2b, checker=dl_checker).notify_live(item_bytes)
+    assert bot2b.send_photo.await_count == 2
+    assert item_bytes.avatar_file_id == "uploaded_fid_2"
+    bot2b.send_message.assert_not_awaited()
 
     # 3. Retries once on TelegramRetryAfter
     bot3 = AsyncMock(spec=Bot)

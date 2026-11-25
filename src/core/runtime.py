@@ -115,7 +115,7 @@ async def run_bot(settings: Settings) -> None:
         repo=repo,
         checker=checker,
         lock=lock,
-        notifier=TelegramWatchNotifier(bot),
+        notifier=TelegramWatchNotifier(bot, checker=checker),
         concurrency=settings.concurrency,
         notify_lock_ttl_seconds=settings.notify_lock_ttl_seconds,
     )
