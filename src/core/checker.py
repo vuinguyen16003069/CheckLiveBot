@@ -244,6 +244,60 @@ class CurlCffiFacebookChecker:
             logger.warning("fb_avatar_download_failed error=%s", exc)
             return None
 
+    async def resolve_uid_from_url(self, url: str) -> str | None:
+        kwargs: dict[str, Any] = {
+            "timeout": (4.0, max(6.0, self._timeout)),
+            "allow_redirects": True,
+            "stream": True,
+            "headers": {
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+            },
+        }
+        proxy = self._proxy_pool.next_proxy()
+        if proxy:
+            kwargs["proxy"] = proxy
+
+        response: Any = None
+        try:
+            response = await self._session.get(url, **kwargs)
+            final_url = str(getattr(response, "url", "") or "")
+            if final_url and (
+                match := re.search(
+                    r"(?:profile\.php\?[^#\s]*\bid=|facebook\.com/|fb\.com/)([1-9]\d{0,19})(?:[/?#&]|$)",
+                    final_url,
+                    re.IGNORECASE,
+                )
+            ):
+                self._proxy_pool.report_success(proxy)
+                return match.group(1)
+
+            status = int(getattr(response, "status_code", 200))
+            if status >= 400:
+                self._proxy_pool.report_failure(proxy)
+                return None
+
+            body = await self._read_head(response)
+            uid = parse_uid_from_profile_html(body)
+            if uid:
+                self._proxy_pool.report_success(proxy)
+                name, avatar = parse_public_profile_html(body)
+                if name is not None or avatar is not None:
+                    self._cache_profile(uid, name, avatar)
+                return uid
+            return None
+        except Exception as exc:
+            self._proxy_pool.report_failure(proxy)
+            logger.warning("fb_resolve_uid_failed url=%s error=%s", url, exc)
+            return None
+        finally:
+            if response is not None and callable(getattr(response, "aclose", None)):
+                with contextlib.suppress(Exception):
+                    await response.aclose()
+
     async def close(self) -> None:
         pending: list[asyncio.Task[Any]] = [
             *self._inflight.values(),
@@ -417,6 +471,19 @@ def parse_graph_picture_payload(
         return CheckOutcome.DIE, "silhouette_placeholder"
 
     return CheckOutcome.LIVE, None
+
+
+def parse_uid_from_profile_html(body: str) -> str | None:
+    for pattern in (
+        r"fb://profile/([1-9]\d{0,19})",
+        r'"userID"\s*:\s*"([1-9]\d{0,19})"',
+        r'"selectedID"\s*:\s*"([1-9]\d{0,19})"',
+        r'"entity_id"\s*:\s*"([1-9]\d{0,19})"',
+    ):
+        match = re.search(pattern, body)
+        if match:
+            return match.group(1)
+    return None
 
 
 def parse_public_profile_html(body: str) -> tuple[str | None, str | None]:

@@ -71,6 +71,9 @@ class _StubChecker:
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         return b"\xff\xd8\xff" if url else None
 
+    async def resolve_uid_from_url(self, url: str) -> str | None:
+        return "100004030621748" if "vuinguyen" in url.lower() else None
+
     async def close(self) -> None:
         return None
 

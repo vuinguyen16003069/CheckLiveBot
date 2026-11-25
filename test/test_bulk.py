@@ -56,6 +56,9 @@ class _StubChecker:
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         return b"\xff\xd8\xff" if url else None
 
+    async def resolve_uid_from_url(self, url: str) -> str | None:
+        return "4" if "zuck" in url.lower() else None
+
     async def close(self) -> None:
         return None
 
@@ -190,7 +193,7 @@ async def test_bulk_check_service_runs_guards_and_closes_cleanly() -> None:
         progress_interval_seconds=0.5,
     )
 
-    with pytest.raises(ValueError, match="UID không hợp lệ"):
+    with pytest.raises(ValueError, match="Không tìm thấy UID hợp lệ"):
         await svc.check_single_uid("invalid")
 
     with pytest.raises(ValueError, match="Không tìm thấy UID"):
@@ -332,7 +335,7 @@ async def test_check_single_uid_profile_fetches_on_live_and_cancels_on_die() -> 
     )
     assert svc.max_bulk_uids == 50000
 
-    with pytest.raises(ValueError, match="UID không hợp lệ"):
+    with pytest.raises(ValueError, match="Không tìm thấy UID hợp lệ"):
         await svc.check_single_uid_profile("not-valid")
 
     uid_live, out_live, name_live, avt_live = await svc.check_single_uid_profile("4")
@@ -657,5 +660,18 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
     await msg_handlers["handle_smart_plain_text"](m_no_bytes, state)
     m_no_bytes.answer_photo.assert_not_awaited()
     m_no_bytes.answer.assert_awaited_once()
+
+    # Pasting a Facebook username/vanity URL resolves UID and checks immediately
+    from src.modules.bulk.domain import extract_fb_url
+
+    assert extract_fb_url("https://www.facebook.com/vuinguyen.2026") == (
+        "https://www.facebook.com/vuinguyen.2026"
+    )
+    assert extract_fb_url("fb.com/zuck") == "https://fb.com/zuck"
+    assert extract_fb_url("https://www.facebook.com/groups/12345") is None
+
+    m_vanity = _make_msg("https://www.facebook.com/zuck")
+    await msg_handlers["handle_smart_plain_text"](m_vanity, state)
+    m_vanity.answer.assert_awaited_once()
 
     await svc.close()

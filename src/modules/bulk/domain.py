@@ -24,10 +24,51 @@ _PEOPLE_UID_RE = re.compile(
     re.IGNORECASE,
 )
 _DIRECT_UID_URL_RE = re.compile(
-    r"(?:https?://)?(?:(?:www|m|mbasic)\.)?(?:facebook|fb)\.com/([1-9]\d{0,19})(?:[/?#\s]|$)",
+    r"(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([1-9]\d{0,19})(?:[/?#\s]|$)",
     re.IGNORECASE,
 )
+_FB_URL_RE = re.compile(
+    r"^(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([^\s?#]+)",
+    re.IGNORECASE,
+)
+_NON_PROFILE_SEGMENTS: frozenset[str] = frozenset(
+    {
+        "login",
+        "groups",
+        "watch",
+        "marketplace",
+        "events",
+        "gaming",
+        "reel",
+        "reels",
+        "stories",
+        "photo",
+        "photo.php",
+        "videos",
+        "sharer",
+        "sharer.php",
+        "help",
+        "settings",
+        "pages",
+        "hashtag",
+        "search",
+    }
+)
 _EMBEDDED_UID_RE = re.compile(r"\b([1-9]\d{4,19})\b")
+
+
+def extract_fb_url(raw: str) -> str | None:
+    """Return normalized https Facebook profile/share URL if raw is a Facebook link."""
+    text = raw.strip()
+    if not text or "\n" in text or " " in text:
+        return None
+    match = _FB_URL_RE.match(text)
+    if not match:
+        return None
+    first_segment = match.group(1).strip("/").split("/", 1)[0].lower()
+    if not first_segment or first_segment in _NON_PROFILE_SEGMENTS:
+        return None
+    return text if text.lower().startswith(("http://", "https://")) else f"https://{text}"
 
 
 def extract_uid(raw: str) -> str | None:

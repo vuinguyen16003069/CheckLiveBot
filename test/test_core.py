@@ -856,6 +856,40 @@ async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_ear
         "https://scontent.xx.fbcdn.net/real.jpg",
     )
 
+    # 4. resolve_uid_from_url parses fb://profile/<uid> and redirect URLs, and pre-caches profile info
+    resolve_sess = _FakeSession(
+        [
+            SimpleNamespace(
+                status_code=200,
+                url="https://www.facebook.com/vuinguyen.2026",
+                text=(
+                    '<html><head><meta property="al:android:url" content="fb://profile/100004030621748" />'
+                    '<meta property="og:title" content="Vui Nguyễn" />'
+                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/v.jpg" /></head></html>'
+                ),
+            ),
+            SimpleNamespace(
+                status_code=200,
+                url="https://www.facebook.com/profile.php?id=4",
+                text="",
+            ),
+            SimpleNamespace(status_code=404, url="https://www.facebook.com/missing", text=""),
+        ]
+    )
+    checker_res = CurlCffiFacebookChecker(session=resolve_sess)  # type: ignore[arg-type]
+    assert (
+        await checker_res.resolve_uid_from_url("https://www.facebook.com/vuinguyen.2026")
+        == "100004030621748"
+    )
+    # Profile info was pre-cached from resolve_uid_from_url (0 extra HTTP calls)
+    assert await checker_res.fetch_profile_info("100004030621748") == (
+        "Vui Nguyễn",
+        "https://scontent.xx.fbcdn.net/v.jpg",
+    )
+    assert await checker_res.resolve_uid_from_url("https://www.facebook.com/share/1abc") == "4"
+    assert await checker_res.resolve_uid_from_url("https://www.facebook.com/missing") is None
+    assert len(resolve_sess.calls) == 3
+
     # 5. close() cancels in-flight check & profile tasks cleanly
     started = asyncio.Event()
 

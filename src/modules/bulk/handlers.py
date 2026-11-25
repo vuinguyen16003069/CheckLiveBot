@@ -24,6 +24,7 @@ from aiogram.types import (
 from src.core.ports import CheckOutcome
 from src.modules.bulk.domain import (
     build_combined_result_file,
+    extract_fb_url,
     extract_uid,
     format_bulk_progress,
     format_single_check,
@@ -256,6 +257,9 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         single = extract_uid(text)
         if single:
             await _reply_single_check(message, bulk_service, single)
+            return
+        if extract_fb_url(text):
+            await _reply_single_check(message, bulk_service, text)
             return
         if "\n" in text:
             try:

@@ -240,7 +240,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
     @router.message(WizardStates.waiting_uid, F.text)
     async def wizard_step_uid(message: Message, state: FSMContext, bot: Bot) -> None:
         draft = await _load_draft(state)
-        uid = extract_uid((message.text or "").strip())
+        uid = await watch_service.resolve_input_uid((message.text or "").strip())
         if not uid:
             await message.answer(
                 "❌ UID chưa đúng (cần 1–20 chữ số, VD: <code>100045216769361</code> "

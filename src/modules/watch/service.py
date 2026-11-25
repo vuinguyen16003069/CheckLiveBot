@@ -11,6 +11,7 @@ from typing import Protocol, cast
 from redis.asyncio import Redis
 
 from src.core.ports import CheckOutcome, FacebookCheckerPort, LockPort
+from src.modules.bulk.domain import extract_fb_url, extract_uid
 from src.modules.watch.domain import (
     WatchItem,
     WatchStats,
@@ -436,10 +437,27 @@ class WatchService:
         self._concurrency = max(1, concurrency)
         self._notify_lock_ttl_seconds = max(30, notify_lock_ttl_seconds)
 
+    async def resolve_input_uid(self, raw: str) -> str | None:
+        uid = extract_uid(raw)
+        if uid:
+            return uid
+        fb_url = extract_fb_url(raw)
+        if fb_url:
+            return await self._checker.resolve_uid_from_url(fb_url)
+        return None
+
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
         return await self._repo.find_by_uid_with_hidden(chat_id, uid)
 
     async def add_watch(self, chat_id: int, user_id: int, raw_args: str) -> WatchItem:
+        first_part = raw_args.split("|", 1)[0].strip()
+        if first_part and not extract_uid(first_part):
+            fb_url = extract_fb_url(first_part)
+            if fb_url:
+                resolved = await self._checker.resolve_uid_from_url(fb_url)
+                if resolved:
+                    rest = raw_args.split("|", 1)[1] if "|" in raw_args else ""
+                    raw_args = f"{resolved} | {rest}" if rest else resolved
         parsed = parse_add_line(raw_args)
         add_lock_key = f"add:{chat_id}:{parsed.uid}"
         lock_acquired = False

@@ -15,6 +15,7 @@ from src.core.ports import (
 )
 from src.modules.bulk.domain import (
     BulkSummary,
+    extract_fb_url,
     extract_uid,
     extract_uids_from_text,
     format_bulk_progress,
@@ -67,10 +68,21 @@ class BulkCheckService:
             logger.info("bulk_job_cancel_requested job_id=%s chat_id=%s", jid, chat_id)
         return True
 
-    async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
+    async def resolve_input_uid(self, raw_uid: str) -> str | None:
         uid = extract_uid(raw_uid)
+        if uid:
+            return uid
+        fb_url = extract_fb_url(raw_uid)
+        if fb_url:
+            return await self._checker.resolve_uid_from_url(fb_url)
+        return None
+
+    async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
+        uid = await self.resolve_input_uid(raw_uid)
         if not uid:
-            raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
+            raise ValueError(
+                "Không tìm thấy UID hợp lệ (cần UID 1–20 chữ số hoặc link trang cá nhân Facebook công khai)."
+            )
 
         result = await self._checker.check(uid)
         return uid, result.outcome
@@ -78,9 +90,11 @@ class BulkCheckService:
     async def check_single_uid_profile(
         self, raw_uid: str
     ) -> tuple[str, CheckOutcome, str | None, str | None]:
-        uid = extract_uid(raw_uid)
+        uid = await self.resolve_input_uid(raw_uid)
         if not uid:
-            raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
+            raise ValueError(
+                "Không tìm thấy UID hợp lệ (cần UID 1–20 chữ số hoặc link trang cá nhân Facebook công khai)."
+            )
 
         profile_task = asyncio.create_task(self._checker.fetch_profile_info(uid))
         try:
