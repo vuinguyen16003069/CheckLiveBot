@@ -382,16 +382,6 @@ def test_parse_public_profile_html_extracts_name_and_avatar() -> None:
         "</head></html>"
     )
     assert parse_public_profile_html(html_die) == (None, None)
-
-    html_twitter_fallback = (
-        '<html><head><meta name="twitter:title" content="Trần Văn A" />'
-        '<meta name="twitter:image" content="https://scontent.xx.fbcdn.net/tw.jpg" />'
-        "</head></html>"
-    )
-    assert parse_public_profile_html(html_twitter_fallback) == (
-        "Trần Văn A",
-        "https://scontent.xx.fbcdn.net/tw.jpg",
-    )
     assert parse_public_profile_html("<title>Đăng nhập Facebook</title>") == (None, None)
     assert parse_public_profile_html("<title>Log in to Facebook</title>") == (None, None)
     assert parse_public_profile_html(
@@ -433,10 +423,11 @@ async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_profile_fallback_no_negative_cache_and_avatar_bytes() -> None:
-    # 1. Falls back from www.facebook.com (login wall) to m.facebook.com and uses crawler UA
-    fallback_sess = _FakeSession(
+async def test_fetch_profile_single_request_no_negative_cache_and_avatar_bytes() -> None:
+    # 1. Sends exactly 1 request to www.facebook.com with WhatsApp crawler UA; empty/HTTP>=400 is NOT cached
+    sess = _FakeSession(
         [
+            SimpleNamespace(status_code=403, text=""),
             SimpleNamespace(
                 status_code=200, text="<html><head><title>Log in to Facebook</title></head></html>"
             ),
@@ -449,35 +440,18 @@ async def test_fetch_profile_fallback_no_negative_cache_and_avatar_bytes() -> No
             ),
         ]
     )
-    checker = CurlCffiFacebookChecker(session=fallback_sess)  # type: ignore[arg-type]
+    checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
+    assert await checker.fetch_profile_info("100004030621748") == (None, None)
+    assert await checker.fetch_profile_info("100004030621748") == (None, None)
     assert await checker.fetch_profile_info("100004030621748") == (
         "Vui Nguyễn",
         "https://scontent.xx.fbcdn.net/v.jpg",
     )
-    assert len(fallback_sess.calls) == 2
-    assert "www.facebook.com" in fallback_sess.calls[0][0]
-    assert "m.facebook.com" in fallback_sess.calls[1][0]
-    assert "WhatsApp/" in fallback_sess.calls[0][1]["headers"]["User-Agent"]
+    assert len(sess.calls) == 3
+    assert all("www.facebook.com" in url for url, _ in sess.calls)
+    assert sess.calls[0][1]["headers"]["User-Agent"].startswith("WhatsApp/")
 
-    # 2. Empty result (None, None) is NOT cached so a subsequent retry fetches fresh data
-    no_neg_sess = _FakeSession(
-        [
-            SimpleNamespace(status_code=403, text=""),
-            SimpleNamespace(
-                status_code=200, text="<html><head><title>Facebook</title></head></html>"
-            ),
-            SimpleNamespace(
-                status_code=200,
-                text='<html><head><meta property="og:title" content="Recovered User" /></head></html>',
-            ),
-        ]
-    )
-    checker_neg = CurlCffiFacebookChecker(session=no_neg_sess)  # type: ignore[arg-type]
-    assert await checker_neg.fetch_profile_info("99") == (None, None)
-    assert await checker_neg.fetch_profile_info("99") == ("Recovered User", None)
-    assert len(no_neg_sess.calls) == 3
-
-    # 3. fetch_avatar_bytes validates status, content-type, and non-empty bytes
+    # 2. fetch_avatar_bytes validates status, content-type, and non-empty bytes
     avt_sess = _FakeSession(
         [
             SimpleNamespace(
@@ -601,15 +575,6 @@ async def test_checker_stream_head_adaptive_429_redirects_and_profile_edge_cases
         '<meta property="og:image" content="not-a-url" /></head></html>'
     )
     assert parse_public_profile_html(html_title_fallback) == ("Jane Doe", None)
-    html_twitter_fallback = (
-        '<html><head><meta name="twitter:title" content="Vui Nguyễn" />'
-        '<meta name="twitter:image" content="https://scontent.xx.fbcdn.net/tw.jpg" />'
-        "</head></html>"
-    )
-    assert parse_public_profile_html(html_twitter_fallback) == (
-        "Vui Nguyễn",
-        "https://scontent.xx.fbcdn.net/tw.jpg",
-    )
     assert parse_public_profile_html("<title>Log in or sign up</title>") == (None, None)
     assert parse_public_profile_html("<title>Đăng nhập Facebook</title>") == (None, None)
     assert parse_public_profile_html("<title>Log in to Facebook</title>") == (None, None)
@@ -646,73 +611,13 @@ async def test_checker_stream_head_adaptive_429_redirects_and_profile_edge_cases
     assert stream_resp.yielded == 2
     assert stream_resp.closed is True
 
-    # 3. Profile fetch error returns (None, None) without raising; empty result falls back to m.facebook.com and is NOT cached
+    # 3. Profile fetch error returns (None, None) without raising
     err_session = _FakeSession([RuntimeError("profile network down")])
     checker_err = CurlCffiFacebookChecker(
         proxies=["http://p1:8080"],
         session=err_session,  # type: ignore[arg-type]
     )
     assert await checker_err.fetch_profile_info("10002") == (None, None)
-
-    fallback_session = _FakeSession(
-        [
-            SimpleNamespace(status_code=200, text="<title>Log in to Facebook</title>"),
-            SimpleNamespace(
-                status_code=200,
-                text=(
-                    '<html><head><meta property="og:title" content="Mobile User" />'
-                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/m.jpg" />'
-                    "</head></html>"
-                ),
-            ),
-        ]
-    )
-    checker_fb = CurlCffiFacebookChecker(session=fallback_session)  # type: ignore[arg-type]
-    assert await checker_fb.fetch_profile_info("10009") == (
-        "Mobile User",
-        "https://scontent.xx.fbcdn.net/m.jpg",
-    )
-    assert len(fallback_session.calls) == 2
-    assert "www.facebook.com" in fallback_session.calls[0][0]
-    assert "m.facebook.com" in fallback_session.calls[1][0]
-    assert fallback_session.calls[0][1]["headers"]["User-Agent"].startswith("WhatsApp/")
-
-    # Empty profile result must NOT be cached so subsequent retry makes fresh request
-    empty_then_ok = _FakeSession(
-        [
-            SimpleNamespace(status_code=403, text=""),
-            SimpleNamespace(status_code=200, text="<title>Đăng nhập Facebook</title>"),
-            SimpleNamespace(
-                status_code=200,
-                text='<meta property="og:title" content="Recovered" />',
-            ),
-        ]
-    )
-    checker_nocache = CurlCffiFacebookChecker(session=empty_then_ok)  # type: ignore[arg-type]
-    assert await checker_nocache.fetch_profile_info("10010") == (None, None)
-    assert await checker_nocache.fetch_profile_info("10010") == ("Recovered", None)
-    assert len(empty_then_ok.calls) == 3
-
-    # fetch_avatar_bytes validates status, content-type, and size
-    avt_session = _FakeSession(
-        [
-            SimpleNamespace(
-                status_code=200, headers={"content-type": "image/jpeg"}, content=b"\xff\xd8\xff"
-            ),
-            SimpleNamespace(
-                status_code=200, headers={"content-type": "text/html"}, content=b"<html>"
-            ),
-            SimpleNamespace(status_code=403, headers={"content-type": "image/jpeg"}, content=b"no"),
-        ]
-    )
-    checker_avt = CurlCffiFacebookChecker(session=avt_session)  # type: ignore[arg-type]
-    assert (
-        await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/ok.jpg")
-        == b"\xff\xd8\xff"
-    )
-    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/bad.jpg") is None
-    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/403.jpg") is None
-    assert await checker_avt.fetch_avatar_bytes("not-a-url") is None
 
     # 4. HTTP 302 redirect is treated as retryable; 429 triggers adaptive rate-limit backoff
     redirect_and_429 = _FakeSession(
@@ -767,3 +672,180 @@ async def test_runtime_run_bot_validates_token_and_closes_redis_on_ping_error(
     with pytest.raises(ConnectionError, match="redis down"):
         await run_bot(Settings(BOT_TOKEN="123:abc", REDIS_URL="redis://localhost:6379/0"))
     fake_redis.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_run_bot_full_lifecycle_and_clean_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from src.core.runtime import run_bot
+
+    fake_redis = AsyncMock()
+    fake_redis.ping = AsyncMock(return_value=True)
+    fake_redis.aclose = AsyncMock()
+    fake_redis.smembers = AsyncMock(return_value=set())
+
+    fake_bot = MagicMock()
+    fake_bot.set_my_commands = AsyncMock()
+    fake_bot.delete_webhook = AsyncMock()
+    fake_bot.session = MagicMock(close=AsyncMock())
+
+    polling_started = asyncio.Event()
+
+    async def _fake_start_polling(_self: Any, _bot: Any) -> None:
+        polling_started.set()
+        await asyncio.sleep(0.02)
+
+    fake_checker = MagicMock()
+    fake_checker.close = AsyncMock()
+
+    def _fake_redis_client(_url: str) -> AsyncMock:
+        return fake_redis
+
+    def _fake_bot_factory(**_kw: Any) -> MagicMock:
+        return fake_bot
+
+    def _fake_checker_factory(**_kw: Any) -> MagicMock:
+        return fake_checker
+
+    monkeypatch.setattr("src.core.runtime.create_redis_client", _fake_redis_client)
+    monkeypatch.setattr("src.core.runtime.Bot", _fake_bot_factory)
+    monkeypatch.setattr("src.core.runtime.CurlCffiFacebookChecker", _fake_checker_factory)
+    monkeypatch.setattr("src.core.runtime.Dispatcher.start_polling", _fake_start_polling)
+
+    await run_bot(Settings(BOT_TOKEN="123:abc", REDIS_URL="redis://localhost:6379/0"))
+
+    assert polling_started.is_set()
+    fake_bot.set_my_commands.assert_awaited_once()
+    fake_bot.delete_webhook.assert_awaited_once_with(drop_pending_updates=False)
+    fake_checker.close.assert_awaited_once()
+    fake_bot.session.close.assert_awaited_once()
+    fake_redis.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_early_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. Profile cache expiry and 512-entry eviction (both expired pruning and oldest eviction)
+    now_ref = [1000.0]
+    monkeypatch.setattr("src.core.checker.time.monotonic", lambda: now_ref[0])
+
+    sess = _FakeSession(
+        [
+            SimpleNamespace(status_code=200, text='<meta property="og:title" content="First" />'),
+            SimpleNamespace(
+                status_code=200, text='<meta property="og:title" content="Refreshed" />'
+            ),
+        ]
+    )
+    checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
+    assert await checker.fetch_profile_info("1") == ("First", None)
+    now_ref[0] += 61.0
+    assert await checker.fetch_profile_info("1") == ("Refreshed", None)
+    assert len(sess.calls) == 2
+
+    # Fill 512 entries with expired items -> next cache write prunes expired entries
+    checker._profile_cache.clear()  # type: ignore[reportPrivateUsage]
+    for i in range(512):
+        checker._profile_cache[f"old_{i}"] = (now_ref[0] - 1.0, f"U{i}", None)  # type: ignore[reportPrivateUsage]
+    checker._cache_profile("fresh_1", "Fresh", None)  # type: ignore[reportPrivateUsage]
+    assert list(checker._profile_cache.keys()) == ["fresh_1"]  # type: ignore[reportPrivateUsage]
+
+    # Fill 512 live (non-expired) entries -> next cache write evicts oldest entry
+    checker._profile_cache.clear()  # type: ignore[reportPrivateUsage]
+    for i in range(512):
+        checker._profile_cache[f"live_{i}"] = (now_ref[0] + 60.0, f"U{i}", None)  # type: ignore[reportPrivateUsage]
+    checker._cache_profile("newest", "Newest", None)  # type: ignore[reportPrivateUsage]
+    assert "live_0" not in checker._profile_cache  # type: ignore[reportPrivateUsage]
+    assert "newest" in checker._profile_cache  # type: ignore[reportPrivateUsage]
+    assert len(checker._profile_cache) == 512  # type: ignore[reportPrivateUsage]
+
+    # 2. _read_head stops early on og:title + og:image before </head> and caps at 256 KB
+    class _ChunkResp:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = chunks
+            self.yielded = 0
+
+        async def aiter_content(self) -> Any:
+            for c in self._chunks:
+                self.yielded += 1
+                yield c
+
+    early_resp = _ChunkResp(
+        [
+            b'<meta property="og:title" content="Fast" />',
+            b'<meta property="og:image" content="https://scontent.xx.fbcdn.net/f.jpg" />',
+            b"MORE HEAD BYTES THAT SHOULD NOT BE READ</head>",
+        ]
+    )
+    body = await CurlCffiFacebookChecker._read_head(early_resp)  # type: ignore[reportPrivateUsage]
+    assert early_resp.yielded == 2
+    assert parse_public_profile_html(body) == ("Fast", "https://scontent.xx.fbcdn.net/f.jpg")
+
+    huge_resp = _ChunkResp([b"x" * 100000 for _ in range(5)])
+    huge_body = await CurlCffiFacebookChecker._read_head(huge_resp)  # type: ignore[reportPrivateUsage]
+    assert huge_resp.yielded == 3
+    assert len(huge_body) == 300000
+
+    # 3. fetch_avatar_bytes rejects oversized (>5MB), empty, exceptions, and forwards proxy
+    avt_sess = _FakeSession(
+        [
+            SimpleNamespace(
+                status_code=200,
+                headers={"Content-Type": "image/png"},
+                content=b"0" * (5 * 1024 * 1024 + 1),
+            ),
+            SimpleNamespace(status_code=200, headers={"content-type": "image/jpeg"}, content=b""),
+            RuntimeError("cdn timeout"),
+            SimpleNamespace(status_code=200, headers={}, content=b"\xff\xd8\xff"),
+        ]
+    )
+    checker_avt = CurlCffiFacebookChecker(
+        proxies=["http://p1:8080"],
+        session=avt_sess,  # type: ignore[arg-type]
+    )
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/big.png") is None
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/empty.jpg") is None
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/err.jpg") is None
+    assert (
+        await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/ok.jpg")
+        == b"\xff\xd8\xff"
+    )
+    assert avt_sess.calls[0][1]["proxy"] == "http://p1:8080"
+
+    # 4. parse_graph_picture_payload non-dict error & _extract_name Vietnamese/English title suffixes
+    assert parse_graph_picture_payload({"error": "plain string error"}, 200) == (
+        CheckOutcome.DIE,
+        "graph_error",
+    )
+    assert parse_public_profile_html("<title>An Nguyễn - Trang chủ | Facebook</title>") == (
+        "An Nguyễn",
+        None,
+    )
+    assert parse_public_profile_html("<title>John Smith - Home | Facebook</title>") == (
+        "John Smith",
+        None,
+    )
+
+    # 5. close() cancels in-flight check & profile tasks cleanly
+    started = asyncio.Event()
+
+    class _HangingSession:
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            started.set()
+            await asyncio.sleep(10.0)
+
+        async def close(self) -> None:
+            return None
+
+    checker_hang = CurlCffiFacebookChecker(session=_HangingSession())  # type: ignore[arg-type]
+    t1 = asyncio.create_task(checker_hang.check("555"))
+    t2 = asyncio.create_task(checker_hang.fetch_profile_info("555"))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    await checker_hang.close()
+    for t in (t1, t2):
+        with pytest.raises(asyncio.CancelledError):
+            await t

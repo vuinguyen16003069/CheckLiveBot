@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -49,6 +50,19 @@ from src.modules.watch.ui import (
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_watch_photo(
+    item: WatchItem,
+    fetch_bytes: Callable[[str], Awaitable[bytes | None]] | None,
+) -> str | BufferedInputFile | None:
+    if item.avatar_file_id:
+        return item.avatar_file_id
+    if item.avatar_url and fetch_bytes is not None:
+        avatar_bytes = await fetch_bytes(item.avatar_url)
+        if avatar_bytes:
+            return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
+    return None
+
+
 class TelegramWatchNotifier:
     def __init__(self, bot: Bot, *, checker: FacebookCheckerPort | None = None) -> None:
         self._bot = bot
@@ -57,38 +71,25 @@ class TelegramWatchNotifier:
     async def notify_live(self, item: WatchItem) -> None:
         text = format_live_notification(item)
         markup = build_watch_keyboard(item)
-
-        async def _send_text() -> None:
-            await self._bot.send_message(chat_id=item.chat_id, text=text, reply_markup=markup)
-
-        async def _try_photo(photo_input: str | BufferedInputFile) -> bool:
-            try:
-                sent = await self._bot.send_photo(
-                    chat_id=item.chat_id,
-                    photo=photo_input,
-                    caption=text,
-                    reply_markup=markup,
-                    has_spoiler=item.is_hidden,
-                )
-                if sent.photo:
-                    item.avatar_file_id = sent.photo[-1].file_id
-                return True
-            except TelegramBadRequest:
-                return False
+        fetch_bytes = self._checker.fetch_avatar_bytes if self._checker is not None else None
+        photo = await _resolve_watch_photo(item, fetch_bytes)
 
         async def _send() -> None:
-            if item.avatar_file_id and await _try_photo(item.avatar_file_id):
-                return
-            if item.avatar_url:
-                if await _try_photo(item.avatar_url):
+            if photo is not None:
+                try:
+                    sent = await self._bot.send_photo(
+                        chat_id=item.chat_id,
+                        photo=photo,
+                        caption=text,
+                        reply_markup=markup,
+                        has_spoiler=item.is_hidden,
+                    )
+                    if sent.photo:
+                        item.avatar_file_id = sent.photo[-1].file_id
                     return
-                if self._checker is not None:
-                    avatar_bytes = await self._checker.fetch_avatar_bytes(item.avatar_url)
-                    if avatar_bytes and await _try_photo(
-                        BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
-                    ):
-                        return
-            await _send_text()
+                except TelegramBadRequest:
+                    pass
+            await self._bot.send_message(chat_id=item.chat_id, text=text, reply_markup=markup)
 
         try:
             try:
@@ -665,11 +666,12 @@ async def _answer_watch_card(
 ) -> None:
     text = format_watch_card(item, title=title)
     if item.status != WatchStatus.DIE:
-
-        async def _try_photo(photo_input: str | BufferedInputFile) -> bool:
+        fetch_bytes = watch_service.fetch_avatar_bytes if watch_service is not None else None
+        photo = await _resolve_watch_photo(item, fetch_bytes)
+        if photo is not None:
             try:
                 sent = await message.answer_photo(
-                    photo=photo_input,
+                    photo=photo,
                     caption=text,
                     reply_markup=reply_markup,
                     has_spoiler=item.is_hidden,
@@ -677,21 +679,9 @@ async def _answer_watch_card(
                 if sent.photo and watch_service is not None:
                     with contextlib.suppress(Exception):
                         await watch_service.save_avatar_file_id(item, sent.photo[-1].file_id)
-                return True
-            except TelegramBadRequest:
-                return False
-
-        if item.avatar_file_id and await _try_photo(item.avatar_file_id):
-            return
-        if item.avatar_url:
-            if await _try_photo(item.avatar_url):
                 return
-            if watch_service is not None:
-                avatar_bytes = await watch_service.fetch_avatar_bytes(item.avatar_url)
-                if avatar_bytes and await _try_photo(
-                    BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
-                ):
-                    return
+            except TelegramBadRequest:
+                pass
     await message.answer(text, reply_markup=reply_markup)
 
 

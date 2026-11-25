@@ -18,11 +18,11 @@ from src.core.ports import CheckOutcome, UidCheckResult
 logger = logging.getLogger(__name__)
 
 
-def _meta_content(body: str, key: str) -> str | None:
-    escaped = re.escape(key)
+def _meta_content(body: str, prop: str) -> str | None:
+    escaped = re.escape(prop)
     for pattern in (
-        rf'<meta[^>]+(?:property|name)=["\']{escaped}["\'][^>]+content=["\']([^"\']+)["\']',
-        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{escaped}["\']',
+        rf'<meta[^>]+property=["\']{escaped}["\'][^>]+content=["\']([^"\']+)["\']',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{escaped}["\']',
     ):
         match = re.search(pattern, body, re.IGNORECASE)
         if match:
@@ -169,9 +169,9 @@ class CurlCffiFacebookChecker:
         return await asyncio.shield(task)
 
     async def _fetch_profile_direct(self, uid: str) -> tuple[str | None, str | None]:
-        base_kwargs: dict[str, Any] = {
+        url = f"https://www.facebook.com/profile.php?id={uid}"
+        kwargs: dict[str, Any] = {
             "timeout": (4.0, max(6.0, self._timeout)),
-            "allow_redirects": True,
             "stream": True,
             "headers": {
                 "User-Agent": "WhatsApp/2.23.20.0",
@@ -179,62 +179,52 @@ class CurlCffiFacebookChecker:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         }
+        proxy = self._proxy_pool.next_proxy()
+        if proxy:
+            kwargs["proxy"] = proxy
 
-        for url in (
-            f"https://www.facebook.com/profile.php?id={uid}",
-            f"https://m.facebook.com/profile.php?id={uid}",
-        ):
-            kwargs = dict(base_kwargs)
-            proxy = self._proxy_pool.next_proxy()
-            if proxy:
-                kwargs["proxy"] = proxy
-
-            response: Any = None
-            try:
-                response = await self._profile_session.get(url, **kwargs)
-                status = int(getattr(response, "status_code", 200))
-                if status >= 400:
-                    self._proxy_pool.report_failure(proxy)
-                    logger.warning(
-                        "fb_profile_info_http_error uid=%s status=%s url=%s", uid, status, url
-                    )
-                    continue
-                body = await self._read_head(response)
-                result = parse_public_profile_html(body) if body else (None, None)
-                if result[0] is not None or result[1] is not None:
-                    self._proxy_pool.report_success(proxy)
-                    self._cache_profile(uid, result[0], result[1])
-                    return result
-                logger.warning(
-                    "fb_profile_info_empty uid=%s status=%s url=%s final_url=%s",
-                    uid,
-                    status,
-                    url,
-                    getattr(response, "url", url),
-                )
-            except Exception as exc:
+        response: Any = None
+        try:
+            response = await self._profile_session.get(url, **kwargs)
+            status = int(getattr(response, "status_code", 200))
+            if status >= 400:
                 self._proxy_pool.report_failure(proxy)
-                logger.warning("fb_profile_info_failed uid=%s error=%s", uid, exc)
+                logger.warning(
+                    "fb_profile_info_http_error uid=%s status=%s url=%s", uid, status, url
+                )
                 return None, None
-            finally:
-                if response is not None and callable(getattr(response, "aclose", None)):
-                    with contextlib.suppress(Exception):
-                        await response.aclose()
-
-        return None, None
+            body = await self._read_head(response)
+            result = parse_public_profile_html(body) if body else (None, None)
+            if result[0] is not None or result[1] is not None:
+                self._proxy_pool.report_success(proxy)
+                self._cache_profile(uid, result[0], result[1])
+                return result
+            logger.warning(
+                "fb_profile_info_empty uid=%s status=%s url=%s final_url=%s",
+                uid,
+                status,
+                url,
+                getattr(response, "url", url),
+            )
+            return None, None
+        except Exception as exc:
+            self._proxy_pool.report_failure(proxy)
+            logger.warning("fb_profile_info_failed uid=%s error=%s", uid, exc)
+            return None, None
+        finally:
+            if response is not None and callable(getattr(response, "aclose", None)):
+                with contextlib.suppress(Exception):
+                    await response.aclose()
 
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         if not url or not url.startswith(("http://", "https://")):
             return None
-        kwargs: dict[str, Any] = {
-            "timeout": (4.0, max(6.0, self._timeout)),
-            "allow_redirects": True,
-        }
+        kwargs: dict[str, Any] = {"timeout": (4.0, max(6.0, self._timeout))}
         proxy = self._proxy_pool.next_proxy()
         if proxy:
             kwargs["proxy"] = proxy
         try:
-            response: Any = await self._session.get(url, **kwargs)
+            response: Any = await self._profile_session.get(url, **kwargs)
             status = int(getattr(response, "status_code", 200))
             if status != 200:
                 return None
@@ -434,7 +424,7 @@ def _contains_any(text: str, markers: Sequence[str]) -> bool:
 
 
 def _extract_name(body: str) -> str | None:
-    candidate = _meta_content(body, "og:title") or _meta_content(body, "twitter:title")
+    candidate = _meta_content(body, "og:title")
     if candidate is None:
         title = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
         candidate = html.unescape(title.group(1)).strip() if title else ""
@@ -471,22 +461,21 @@ def _extract_name(body: str) -> str | None:
 
 
 def _extract_avatar(body: str) -> str | None:
-    for meta_key in ("og:image", "twitter:image"):
-        image = _meta_content(body, meta_key)
-        if (
-            image
-            and image.startswith(("http://", "https://"))
-            and not _contains_any(
-                image.lower(),
-                (
-                    "static.xx.fbcdn.net",
-                    "/rsrc.php/",
-                    "c5yt7c_3z_g",
-                    "fb_icon",
-                    "facebook_icon",
-                    "fb_logo",
-                ),
-            )
-        ):
-            return image
+    image = _meta_content(body, "og:image")
+    if (
+        image
+        and image.startswith(("http://", "https://"))
+        and not _contains_any(
+            image.lower(),
+            (
+                "static.xx.fbcdn.net",
+                "/rsrc.php/",
+                "c5yt7c_3z_g",
+                "fb_icon",
+                "facebook_icon",
+                "fb_logo",
+            ),
+        )
+    ):
+        return image
     return None

@@ -273,19 +273,16 @@ async def _send_single_photo(
     caption: str,
     reply_markup: InlineKeyboardMarkup,
 ) -> bool:
-    try:
-        await message.answer_photo(photo=avatar_url, caption=caption, reply_markup=reply_markup)
+    avatar_bytes = await bulk_service.fetch_avatar_bytes(avatar_url)
+    if not avatar_bytes:
+        return False
+    with contextlib.suppress(TelegramBadRequest):
+        await message.answer_photo(
+            photo=BufferedInputFile(avatar_bytes, filename=f"{uid}.jpg"),
+            caption=caption,
+            reply_markup=reply_markup,
+        )
         return True
-    except TelegramBadRequest:
-        avatar_bytes = await bulk_service.fetch_avatar_bytes(avatar_url)
-        if avatar_bytes:
-            with contextlib.suppress(TelegramBadRequest):
-                await message.answer_photo(
-                    photo=BufferedInputFile(avatar_bytes, filename=f"{uid}.jpg"),
-                    caption=caption,
-                    reply_markup=reply_markup,
-                )
-                return True
     return False
 
 

@@ -417,7 +417,9 @@ async def main() -> None:
     parser.add_argument("--info", action="store_true", help="Xem dung lượng và thống kê DB")
     parser.add_argument("--dump", action="store_true", help="Hiển thị JSON Dump toàn bộ Redis")
     parser.add_argument("--export", nargs="?", const="default", help="Xuất Redis ra file JSON")
-    parser.add_argument("--sync-ttl", action="store_true", help="Đồng bộ lại TTL chuẩn cho các key hiện có")
+    parser.add_argument(
+        "--sync-ttl", action="store_true", help="Đồng bộ lại TTL chuẩn cho các key hiện có"
+    )
     parser.add_argument("--pattern", default="*", help="Pattern filter khi dump/export")
     args = parser.parse_args()
 

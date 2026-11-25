@@ -69,7 +69,7 @@ class _StubChecker:
         return None, None
 
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
-        return None
+        return b"\xff\xd8\xff" if url else None
 
     async def close(self) -> None:
         return None
@@ -647,10 +647,10 @@ async def test_telegram_watch_notifier_photo_file_id_fallback_retry_and_forbidde
 
     from src.modules.watch.handlers import TelegramWatchNotifier
 
-    # 1. Sends photo via avatar_url and caches returned file_id onto item
+    # 1. Downloads avatar bytes via checker, sends BufferedInputFile, and caches returned file_id
     bot = AsyncMock(spec=Bot)
     bot.send_photo.return_value = MagicMock(photo=[MagicMock(file_id="cached_fid_1")])
-    notifier = TelegramWatchNotifier(bot)
+    notifier = TelegramWatchNotifier(bot, checker=_StubChecker({}))
     item = WatchItem(
         id=1,
         chat_id=10,
@@ -666,28 +666,14 @@ async def test_telegram_watch_notifier_photo_file_id_fallback_retry_and_forbidde
     bot.send_photo.assert_awaited_once()
     assert item.avatar_file_id == "cached_fid_1"
 
-    # 2. If cached file_id fails with TelegramBadRequest, falls back to avatar_url then text
+    # 2. Cached file_id is reused directly; if Telegram rejects it, falls back cleanly to text
     bot2 = AsyncMock(spec=Bot)
     bad_req = TelegramBadRequest(method=SendPhoto(chat_id=10, photo="x"), message="wrong file id")
-    bot2.send_photo.side_effect = [bad_req, bad_req]
-    notifier2 = TelegramWatchNotifier(bot2)
+    bot2.send_photo.side_effect = bad_req
+    notifier2 = TelegramWatchNotifier(bot2, checker=_StubChecker({}))
     await notifier2.notify_live(item)
-    assert bot2.send_photo.await_count == 2
+    bot2.send_photo.assert_awaited_once()
     bot2.send_message.assert_awaited_once()
-
-    # 2b. If avatar_url fails on Telegram, downloads avatar bytes via checker and sends BufferedInputFile
-    bot2b = AsyncMock(spec=Bot)
-    bot2b.send_photo.side_effect = [
-        bad_req,
-        MagicMock(photo=[MagicMock(file_id="uploaded_fid_2")]),
-    ]
-    dl_checker = _StubChecker({})
-    dl_checker.fetch_avatar_bytes = AsyncMock(return_value=b"\xff\xd8\xff")
-    item_bytes = item.model_copy(update={"avatar_file_id": ""})
-    await TelegramWatchNotifier(bot2b, checker=dl_checker).notify_live(item_bytes)
-    assert bot2b.send_photo.await_count == 2
-    assert item_bytes.avatar_file_id == "uploaded_fid_2"
-    bot2b.send_message.assert_not_awaited()
 
     # 3. Retries once on TelegramRetryAfter
     bot3 = AsyncMock(spec=Bot)
@@ -903,5 +889,191 @@ async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
         q_del, WatchActionCallback(action="delete_confirm", watch_id=created.id), state
     )
     assert await svc.find_by_uid(100, "100050") is None
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_watch_service_repo_and_handler_edge_cases() -> None:
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendPhoto
+    from aiogram.types import Message
+
+    from src.modules.watch.handlers import _answer_watch_card, create_watch_router  # type: ignore[reportPrivateUsage]
+    from src.modules.watch.ui import WizardCallback
+
+    # 1. WatchTtlPolicy validation
+    with pytest.raises(ValueError, match="die_days must be >= 1"):
+        WatchTtlPolicy(die_days=0)
+    with pytest.raises(ValueError, match="seq_days must be >= 0"):
+        WatchTtlPolicy(seq_days=-1)
+
+    # 2. Repository edge cases: seq_ttl > 0, stale chat_uid cleanup, list_die_items pruning,
+    #    empty compact_chat_uid, set_chat_hidden(False), set_chat_hidden_and_get missing
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    repo = RedisWatchRepository(redis, prefix="edge", ttl_policy=WatchTtlPolicy(seq_days=30))
+    assert await repo.compact_chat_uid(999) == 0
+
+    item = await repo.create(
+        chat_id=10,
+        owner_user_id=1,
+        uid="100001",
+        note="n",
+        price="0",
+        faq="",
+        status=WatchStatus.DIE,
+    )
+    assert await redis.ttl("edge:seq:watch_id") > 0
+
+    # Inject stale watch IDs into watches:die (one deleted, one LIVE)
+    live_item = await repo.create(
+        chat_id=10,
+        owner_user_id=1,
+        uid="100002",
+        note="n2",
+        price="0",
+        faq="",
+        status=WatchStatus.LIVE,
+    )
+    await redis.sadd("edge:watches:die", "999999", str(live_item.id))
+    die_items = await repo.list_die_items()
+    assert [i.id for i in die_items] == [item.id]
+    assert await redis.smembers("edge:watches:die") == {str(item.id)}
+
+    # Expire watch:{id} -> find_by_uid and find_by_uid_with_hidden prune stale chat_uid hash
+    await redis.delete(f"edge:watch:{item.id}")
+    assert await repo.find_by_uid(10, "100001") is None
+    await redis.hset("edge:chat_uid:10", "100001", str(item.id))
+    assert await repo.find_by_uid_with_hidden(10, "100001") is None
+
+    await repo.set_chat_hidden(10, True)
+    assert await repo.get_chat_hidden(10) is True
+    await repo.set_chat_hidden(10, False)
+    assert await repo.get_chat_hidden(10) is False
+    assert await repo.set_chat_hidden_and_get(10, 999999, True) is None
+
+    # 3. WatchService: add_watch cancels profile_task on check() error; recheck_chat target_uid & error isolation
+    profile_cancelled = False
+
+    class _FailingChecker(_StubChecker):
+        async def check(self, uid: str) -> UidCheckResult:
+            if uid == "100077":
+                raise RuntimeError("graph boom")
+            return await super().check(uid)
+
+        async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+            nonlocal profile_cancelled
+            if uid == "100077":
+                try:
+                    await asyncio.sleep(5.0)
+                except asyncio.CancelledError:
+                    profile_cancelled = True
+                    raise
+            return await super().fetch_profile_info(uid)
+
+    fail_checker = _FailingChecker(
+        {"100080": CheckOutcome.DIE, "100081": CheckOutcome.DIE},
+        verify_mapping={"100080": (CheckOutcome.DIE, None)},
+    )
+    svc = WatchService(repo=repo, checker=fail_checker, max_active_per_chat=0)
+
+    with pytest.raises(RuntimeError, match="graph boom"):
+        await svc.add_watch(20, 1, "100077")
+    assert profile_cancelled is True
+
+    w80 = await svc.add_watch(20, 1, "100080")
+    await svc.add_watch(20, 1, "100081")
+    fail_checker.mapping["100080"] = CheckOutcome.LIVE
+    # target_uid filters to 100080; verify_live rejects LIVE -> 0 turned_live
+    scanned, turned = await svc.recheck_chat(20, target_uid="100080")
+    assert (scanned, turned) == (1, [])
+
+    with pytest.raises(ValueError, match="Không tìm thấy kèo"):
+        await svc.set_hidden(999, w80.id, True)
+
+    # WatcherScanService isolates unexpected checker exception
+    scanner = WatcherScanService(
+        repo=repo,
+        checker=fail_checker,
+        lock=RedisLock(redis, prefix="edge"),
+        notifier=_StubNotifier(),
+    )
+    await repo.create(
+        chat_id=20,
+        owner_user_id=1,
+        uid="100077",
+        note="err",
+        price="0",
+        faq="",
+        status=WatchStatus.DIE,
+    )
+    assert await scanner.scan_once() == 0
+
+    # 4. Handlers: _answer_watch_card BufferedInputFile upload + save_avatar_file_id + TelegramBadRequest fallback
+    live_card_item = await repo.create(
+        chat_id=30,
+        owner_user_id=1,
+        uid="4",
+        fb_name="Mark Zuckerberg",
+        avatar_url="https://scontent.xx.fbcdn.net/zuck.jpg",
+        note="VIP",
+        price="100k",
+        faq="",
+        status=WatchStatus.LIVE,
+    )
+    m_card = MagicMock(spec=Message)
+    m_card.answer_photo = AsyncMock(return_value=MagicMock(photo=[MagicMock(file_id="saved_fid")]))
+    m_card.answer = AsyncMock()
+    await _answer_watch_card(m_card, live_card_item, watch_service=svc)
+    m_card.answer_photo.assert_awaited_once()
+    assert live_card_item.avatar_file_id == "saved_fid"
+
+    m_card_fail = MagicMock(spec=Message)
+    m_card_fail.answer_photo = AsyncMock(
+        side_effect=TelegramBadRequest(method=SendPhoto(chat_id=30, photo="x"), message="bad")
+    )
+    m_card_fail.answer = AsyncMock()
+    await _answer_watch_card(m_card_fail, live_card_item, watch_service=svc)
+    m_card_fail.answer.assert_awaited_once()
+
+    # cb_wizard edge cases: expired draft, recover draft from text + pick_price + skip_faq, empty recheck_all
+    router = create_watch_router(svc)
+    cb_handlers = {h.callback.__name__: h.callback for h in router.callback_query.handlers}
+
+    state_data: dict[str, object] = {}
+
+    def _update_state(**kw: object) -> None:
+        state_data.update(kw)
+
+    state = MagicMock()
+    state.get_data = AsyncMock(side_effect=lambda: dict(state_data))
+    state.update_data = AsyncMock(side_effect=_update_state)
+    state.set_state = AsyncMock()
+    state.clear = AsyncMock(side_effect=state_data.clear)
+
+    q_expired = MagicMock(
+        message=MagicMock(
+            spec=Message, chat=MagicMock(id=30), text="no draft", photo=None, message_id=1
+        ),
+        from_user=MagicMock(id=1),
+        answer=AsyncMock(),
+    )
+    await cb_handlers["cb_wizard"](q_expired, WizardCallback(action="skip_faq"), state)
+    assert q_expired.answer.call_args.kwargs.get("show_alert") is True
+
+    # Non-Message callback returns cleanly
+    q_no_msg = MagicMock(message=None, answer=AsyncMock())
+    await cb_handlers["cb_recheck_all"](q_no_msg)
+    q_no_msg.answer.assert_awaited_once()
+
+    # Empty recheck_all on chat with no DIE items
+    q_empty_rc = MagicMock(
+        message=MagicMock(spec=Message, chat=MagicMock(id=9999)), answer=AsyncMock()
+    )
+    await cb_handlers["cb_recheck_all"](q_empty_rc)
+    assert "Không có kèo DIE" in q_empty_rc.answer.call_args.args[0]
 
     await redis.aclose()
