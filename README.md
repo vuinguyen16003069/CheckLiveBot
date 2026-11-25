@@ -33,7 +33,7 @@ Telegram Bot kiểm tra trạng thái **LIVE / DIE UID Facebook** tốc độ ca
 
 - **Dùng ngay cho chat riêng & group**: Dữ liệu cô lập tuyệt đối theo `chat_id`, kèm `ThrottlingMiddleware` chống spam theo cửa sổ trượt trong RAM (`0` lệnh Redis).
 - **Check nhanh & Check hàng loạt tối đa `50.000` UID**:
-  - Dán thẳng **1 UID / link Facebook** hoặc `/check <UID>` để kiểm tra tức thì.
+  - Dán thẳng **1 UID / link Facebook** hoặc `/check <UID>` để kiểm tra tức thì — tự động lấy **tên & ảnh đại diện công khai** qua luồng OpenGraph SSR (tải trực tiếp `BufferedInputFile`, cache `avatar_file_id` trên Telegram cho kèo theo dõi), bấm **`🔄 Check lại`** tự cập nhật ảnh khi tài khoản về `LIVE`.
   - Dán **nhiều dòng UID** hoặc gửi file `.txt` (tối đa `10 MB`) → parse & lọc trùng siêu nhanh (`50.000` UID trong `~20 ms`, đẩy sang worker thread với file lớn để không khựng bot) → quét song song bằng worker pool trong RAM (`0` overhead Redis) → cập nhật thanh tiến độ kèm tốc độ `UID/s`, `ETA` và nút **`🛑 Dừng check`** → xuất gọn **1 file** `result_<job_id>.txt`.
 - **Độ chính xác cao & Chống chặn (Anti-Ban)**:
   - `curl_cffi` giả lập Chrome TLS JA3/JA4, chế độ **stateless** (`discard_cookies=True`, `allow_redirects=False`), split timeout `(connect, read)` để fail-fast khi proxy treo.
@@ -58,7 +58,7 @@ Dự án chỉ giữ lại đúng **4 thư viện runtime cốt lõi** (+ `pydan
 | **HTTP & Anti-Ban** | `curl_cffi` | Giả lập Chrome TLS JA3/JA4, HTTP/2, stateless cookie, HTTP/SOCKS5 proxy |
 | **Lưu trữ & Khóa** | `redis` (`redis.asyncio`) | Lưu kèo (`String`/`Hash`/`Set`/`ZSet`, TTL phân tầng theo trạng thái) & `RedisLock` (`SET NX EX`) |
 | **Config & Logging** | `pydantic` + Python stdlib (`logging`, `pathlib`) | Validate `.env` ngay khi khởi động; formatter `console` (dev) & `json` (prod) |
-| **Quality Assurance** *(dev)* | `ruff`, `pyright` (strict), `pytest`, `fakeredis` | Lint, format, kiểm tra kiểu nghiêm ngặt và 49 unit tests chạy offline |
+| **Quality Assurance** *(dev)* | `ruff`, `pyright` (strict), `pytest`, `pytest-cov`, `fakeredis` | Lint, format, kiểm tra kiểu nghiêm ngặt và 65 unit tests chạy offline (độ phủ ~97%) |
 
 ---
 
@@ -383,6 +383,9 @@ uv run ruff check .
 uv run ruff format --check .
 uv run pyright
 uv run pytest -v
+
+# Chạy test kèm báo cáo độ phủ (coverage)
+uv run pytest --cov=src --cov-report=term-missing -v
 
 # Cập nhật thư viện lên bản mới nhất
 uv sync --upgrade
