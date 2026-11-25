@@ -22,7 +22,6 @@ from src.modules.watch.domain import (
 )
 from src.modules.watch.service import DuplicateWatchError, WatchService
 from src.modules.watch.ui import (
-    DashboardCallback,
     DealDraft,
     ListLookupStates,
     ListPageCallback,
@@ -31,7 +30,6 @@ from src.modules.watch.ui import (
     WatchActionCallback,
     WizardCallback,
     WizardStates,
-    build_dashboard_keyboard,
     build_delete_confirm_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
@@ -161,17 +159,10 @@ def create_watch_router(watch_service: WatchService) -> Router:
             )
             return
 
-        async def _attach_keyboard() -> Message:
-            return await message.answer("...", reply_markup=build_reply_keyboard())
-
-        tmp, stats = await asyncio.gather(
-            _attach_keyboard(),
-            watch_service.get_stats(message.chat.id),
-        )
-        with contextlib.suppress(TelegramBadRequest):
-            await tmp.delete()
+        stats = await watch_service.get_stats(message.chat.id)
         await message.answer(
-            format_welcome_dashboard(stats), reply_markup=build_dashboard_keyboard()
+            format_welcome_dashboard(stats),
+            reply_markup=build_reply_keyboard(),
         )
 
     @router.message(Command("help"))
@@ -207,17 +198,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
             "📊 Thống kê": "stats",
         }[message.text or ""]
         await run_menu(action, message, state, bot)
-
-    @router.callback_query(DashboardCallback.filter())
-    async def cb_dashboard(
-        query: CallbackQuery,
-        callback_data: DashboardCallback,
-        state: FSMContext,
-        bot: Bot,
-    ) -> None:
-        if isinstance(query.message, Message):
-            await run_menu(callback_data.action, query.message, state, bot)
-        await query.answer()
 
     @router.message(Command("add"))
     async def cmd_add(message: Message, command: CommandObject, state: FSMContext) -> None:

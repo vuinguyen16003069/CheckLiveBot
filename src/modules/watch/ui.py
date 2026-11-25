@@ -31,10 +31,6 @@ class RecheckAllCallback(CallbackData, prefix="ra"):
     pass
 
 
-class DashboardCallback(CallbackData, prefix="db"):
-    action: str
-
-
 class WatchActionCallback(CallbackData, prefix="w"):
     action: str
     watch_id: int
@@ -71,33 +67,6 @@ def build_reply_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
         is_persistent=True,
-    )
-
-
-def build_dashboard_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Lên kèo",
-                    callback_data=DashboardCallback(action="add").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📋 Danh sách",
-                    callback_data=DashboardCallback(action="list").pack(),
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔎 Check nhanh",
-                    callback_data=DashboardCallback(action="check").pack(),
-                ),
-                InlineKeyboardButton(
-                    text="📊 Thống kê",
-                    callback_data=DashboardCallback(action="stats").pack(),
-                ),
-            ],
-        ]
     )
 
 

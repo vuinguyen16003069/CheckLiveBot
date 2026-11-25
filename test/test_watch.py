@@ -29,7 +29,6 @@ from src.modules.watch.service import (
 )
 from src.modules.watch.ui import (
     DealDraft,
-    build_dashboard_keyboard,
     build_delete_confirm_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
@@ -168,7 +167,6 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     rk = build_reply_keyboard()
     assert len(rk.keyboard) == 2
     assert len(rk.keyboard[0]) == 2
-    assert len(build_dashboard_keyboard().inline_keyboard) == 2
 
     draft = DealDraft()
     assert "Bước 1/4" in format_wizard_step(1, draft)
@@ -494,7 +492,7 @@ async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> N
     from unittest.mock import AsyncMock, MagicMock
 
     from aiogram.filters import CommandObject
-    from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup
+    from aiogram.types import ReplyKeyboardMarkup
 
     from src.modules.watch.handlers import create_watch_router
 
@@ -542,19 +540,14 @@ async def test_cmd_start_attaches_persistent_reply_keyboard_and_dashboard() -> N
         state=state,
     )
 
-    assert len(sent_messages) == 2
-    assert sent_messages[0].text.strip(" \t\n\r\u200b\u200c\u200d\ufeff") != ""
+    assert len(sent_messages) == 1
+    assert "Đang chờ: <b>0</b>" in sent_messages[0].text
     reply_kb = sent_messages[0].kwargs.get("reply_markup")
     assert isinstance(reply_kb, ReplyKeyboardMarkup)
     assert reply_kb.is_persistent is True
     assert reply_kb.resize_keyboard is True
     assert sum(len(row) for row in reply_kb.keyboard) == 4
-    sent_messages[0].delete.assert_awaited_once()
-
-    dashboard_kb = sent_messages[1].kwargs.get("reply_markup")
-    assert isinstance(dashboard_kb, InlineKeyboardMarkup)
-    assert sum(len(row) for row in dashboard_kb.inline_keyboard) == 4
-    assert "Đang chờ: <b>0</b>" in sent_messages[1].text
+    sent_messages[0].delete.assert_not_awaited()
 
     await redis.aclose()
 
@@ -711,7 +704,6 @@ async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
 
     from src.modules.watch.handlers import create_watch_router
     from src.modules.watch.ui import (
-        DashboardCallback,
         ListPageCallback,
         QuickWatchCallback,
         WatchActionCallback,
@@ -788,10 +780,6 @@ async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
         m_sc = _msg(btn)
         await msg_handlers["handle_reply_shortcuts"](m_sc, state, bot)
         m_sc.answer.assert_awaited()
-
-    q_db = MagicMock(message=_msg(), answer=AsyncMock())
-    await cb_handlers["cb_dashboard"](q_db, DashboardCallback(action="stats"), state, bot)
-    q_db.answer.assert_awaited_once()
 
     # 2. /add valid, duplicate, invalid + /start deep link w_<id> (found & not found)
     m_add = _msg()
