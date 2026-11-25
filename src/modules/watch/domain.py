@@ -173,6 +173,21 @@ def format_live_notification(item: WatchItem) -> str:
     return format_watch_card(item, title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!")
 
 
+def _format_list_note(note: str, max_len: int = 42) -> str:
+    cleaned = " ".join(note.split())
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return html.escape(cleaned).replace("@", "@\u200b")
+
+
+def _format_list_note(note: str, max_len: int = 42) -> str:
+    cleaned = " ".join(note.split())
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    # Insert zero-width space after '@' so Telegram does not turn emails into blue links next to UID
+    return html.escape(cleaned).replace("@", "@\u200b")
+
+
 def format_watch_list(
     items: list[WatchItem],
     *,
@@ -183,12 +198,12 @@ def format_watch_list(
     bot_username: str | None = None,
 ) -> str:
     header = (
-        f"📋 <b>Danh sách kèo</b> (Lọc: <b>{html.escape(status_filter)}</b> | "
-        f"Trang {page}/{total_pages} | Tổng {total_items})\n"
+        f"📋 <b>Danh sách kèo</b>  •  <b>{html.escape(status_filter)}</b>  "
+        f"(Trang {page}/{total_pages} · {total_items} kèo)"
     )
     if not items:
-        return header + "\n📭 Chưa có kèo nào phù hợp."
-    rows: list[str] = [header]
+        return f"{header}\n\n📭 Chưa có kèo nào phù hợp."
+    blocks: list[str] = [header]
     for item in items:
         badge = {
             WatchStatus.DIE: "🔴",
@@ -204,17 +219,20 @@ def format_watch_list(
             )
         else:
             uid_display = f"<code>{escaped_uid}</code>"
-        note_display = html.escape(item.note)
         price_display = html.escape(_format_price(item.price))
-        faq_part = f" | ⚠️ {html.escape(item.faq)}" if item.faq else ""
-        rows.append(
-            f"{badge} <b>#\u200b{item.id}</b> {uid_display} — {note_display} | 💰 {price_display}{faq_part}"
+        faq_part = f"  <i>[{html.escape(item.faq)}]</i>" if item.faq else ""
+        note_display = _format_list_note(item.note)
+        blocks.append(
+            f"{badge} <b>#\u200b{item.id}</b> · {uid_display}  •  <b>{price_display}</b>{faq_part}\n"
+            f"   └ {note_display}"
         )
-    if bot_username:
-        rows.append("\n<i>⇨ Chạm vào UID để xem chi tiết kèo hoặc nhắn UID / link để tra cứu.</i>")
-    else:
-        rows.append("\n<i>⇨ Nhắn UID hoặc link Facebook để tra cứu nhanh chi tiết kèo.</i>")
-    return "\n".join(rows)
+    hint = (
+        "<i>⇨ Chạm UID để mở chi tiết · hoặc gửi UID / link FB để tra cứu.</i>"
+        if bot_username
+        else "<i>⇨ Gửi UID hoặc link Facebook để tra cứu nhanh chi tiết kèo.</i>"
+    )
+    blocks.append(hint)
+    return "\n\n".join(blocks)
 
 
 def format_welcome_dashboard(stats: WatchStats) -> str:

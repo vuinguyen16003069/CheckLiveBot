@@ -207,7 +207,14 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert "<code>10001</code>" in list_no_bot
 
     list_html = format_watch_list(
-        [sample_item],
+        [
+            sample_item.model_copy(
+                update={
+                    "note": "VIA CỔ 1000X - verylongemailaddress123456@hotmail.com",
+                    "faq": "583 toàn vẹn",
+                }
+            )
+        ],
         status_filter="ALL",
         page=1,
         total_pages=1,
@@ -215,6 +222,20 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
         bot_username="my_checklive_bot",
     )
     assert 'href="https://t.me/my_checklive_bot?start=w_7"' in list_html
+    assert "<b>0đ</b>" in list_html
+    assert "[583 toàn vẹn]" in list_html
+    assert "…" in list_html
+    assert "⇨ Chạm UID để mở chi tiết" in list_html
+
+    list_email = format_watch_list(
+        [sample_item.model_copy(update={"note": "abc@gmail.com"})],
+        status_filter="ALL",
+        page=1,
+        total_pages=1,
+        total_items=1,
+        bot_username="my_checklive_bot",
+    )
+    assert "abc@\u200bgmail.com" in list_email
 
     del_kb = build_delete_confirm_keyboard(7)
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
@@ -346,9 +367,9 @@ async def test_watch_service_lifecycle_pagination_recheck_and_isolation() -> Non
         checker.mapping[uid] = CheckOutcome.DIE
         await svc.add_watch(chat_id=300, user_id=1, raw_args=f"{uid} | Item {i} | 10k")
     page1, total300, pages300 = await svc.list_watches(300, page=1)
-    assert (len(page1), total300, pages300) == (10, 12, 2)
+    assert (len(page1), total300, pages300) == (8, 12, 2)
     page_clamped, _, _ = await svc.list_watches(300, page=99)
-    assert len(page_clamped) == 2
+    assert len(page_clamped) == 4
 
     await redis.aclose()
 
