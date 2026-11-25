@@ -971,7 +971,7 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     assert await repo.set_chat_hidden_and_get(10, 999999, True) is None
 
     # 3. WatchService: add_watch cancels profile_task on check() error; recheck_chat target_uid & error isolation
-    profile_cancelled = False
+    cancelled_uids: list[str] = []
 
     class _FailingChecker(_StubChecker):
         async def check(self, uid: str) -> UidCheckResult:
@@ -980,12 +980,11 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
             return await super().check(uid)
 
         async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
-            nonlocal profile_cancelled
             if uid == "100077":
                 try:
                     await asyncio.sleep(5.0)
                 except asyncio.CancelledError:
-                    profile_cancelled = True
+                    cancelled_uids.append(uid)
                     raise
             return await super().fetch_profile_info(uid)
 
@@ -997,7 +996,7 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
 
     with pytest.raises(RuntimeError, match="graph boom"):
         await svc.add_watch(20, 1, "100077")
-    assert profile_cancelled is True
+    assert cancelled_uids == ["100077"]
 
     w80 = await svc.add_watch(20, 1, "100080")
     await svc.add_watch(20, 1, "100081")
@@ -1084,12 +1083,13 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     await cb_handlers["cb_recheck_all"](q_no_msg)
     q_no_msg.answer.assert_awaited_once()
 
-    # Empty recheck_all on chat with no DIE items answers immediately and notifies in chat
+    # Empty recheck_all on chat with no DIE items shows toast only (no chat message)
     m_empty_rc = MagicMock(spec=Message, chat=MagicMock(id=9999), answer=AsyncMock())
     q_empty_rc = MagicMock(message=m_empty_rc, answer=AsyncMock())
     await cb_handlers["cb_recheck_all"](q_empty_rc)
     q_empty_rc.answer.assert_awaited_once()
-    assert "Không có kèo DIE" in m_empty_rc.answer.call_args.args[0]
+    assert "Không có kèo DIE" in q_empty_rc.answer.call_args.args[0]
+    m_empty_rc.answer.assert_not_awaited()
 
     # Concurrent add_watch with RedisLock prevents duplicate creation
     add_lock = RedisLock(redis, prefix="edge")

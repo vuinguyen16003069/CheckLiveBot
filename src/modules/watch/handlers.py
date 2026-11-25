@@ -375,15 +375,18 @@ def create_watch_router(watch_service: WatchService) -> Router:
         msg = await _callback_message(query)
         if msg is None:
             return
-        with contextlib.suppress(TelegramBadRequest):
-            await query.answer("🔄 Đang quét lại các kèo DIE...")
         scanned, turned_live = await watch_service.recheck_chat(msg.chat.id)
         if scanned == 0:
-            await msg.answer("📭 Không có kèo DIE nào cần quét lại.")
+            with contextlib.suppress(TelegramBadRequest):
+                await query.answer("📭 Không có kèo DIE nào cần quét lại.")
             return
-        if not turned_live:
-            await msg.answer(f"🔄 Đã quét <b>{scanned}</b> kèo DIE — chưa có kèo nào về LIVE.")
-            return
+        toast = (
+            f"🔄 Đã quét {scanned} kèo DIE — {len(turned_live)} kèo về LIVE!"
+            if turned_live
+            else f"🔄 Đã quét {scanned} kèo DIE — chưa có kèo nào về LIVE."
+        )
+        with contextlib.suppress(TelegramBadRequest):
+            await query.answer(toast)
         for item in turned_live:
             await _answer_watch_card(
                 msg,

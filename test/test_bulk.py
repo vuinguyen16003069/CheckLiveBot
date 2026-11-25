@@ -529,22 +529,21 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
     await slow_svc.close()
 
     # 2. check_single_uid_profile cancels profile_task if check() raises unexpectedly
-    profile_cancelled = False
+    cancelled_uids: list[str] = []
 
     class _BoomChecker(_StubChecker):
         async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
-            nonlocal profile_cancelled
             try:
                 await asyncio.sleep(5.0)
             except asyncio.CancelledError:
-                profile_cancelled = True
+                cancelled_uids.append(uid)
                 raise
             return None, None
 
     boom_svc = BulkCheckService(checker=_BoomChecker({}, fail_uid="4", delay=0.01))
     with pytest.raises(RuntimeError, match="boom"):
         await boom_svc.check_single_uid_profile("4")
-    assert profile_cancelled is True
+    assert cancelled_uids == ["4"]
 
     # 3. TelegramBulkNotifier.update_progress swallows TelegramBadRequest and generic errors
     bot_err = AsyncMock(spec=Bot)
