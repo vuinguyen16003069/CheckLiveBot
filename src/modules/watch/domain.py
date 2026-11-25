@@ -235,7 +235,7 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
 
 def format_watch_stats(stats: WatchStats) -> str:
     return (
-        "📊 <b>Thống kê kèo (3 tháng gần nhất)</b>\n\n"
+        "📊 <b>Thống kê kèo hiện có</b>\n\n"
         f"• Tổng số kèo: <b>{stats.total}</b>\n"
         f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>\n"
         f"• 🟢 Đã về LIVE: <b>{stats.live}</b>\n"

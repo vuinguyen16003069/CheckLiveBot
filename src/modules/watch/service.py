@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import math
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
@@ -18,6 +19,83 @@ from src.modules.watch.domain import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class WatchTtlPolicy:
+    """Single source of truth for tiered Redis TTLs across watch lifecycle & metadata."""
+
+    die_days: int = 90
+    live_days: int = 60
+    done_days: int = 30
+    cancelled_days: int = 14
+    pref_days: int = 365
+    seq_days: int = 0  # 0 = permanent (no TTL)
+
+    def __post_init__(self) -> None:
+        for field_name in ("die_days", "live_days", "done_days", "cancelled_days", "pref_days"):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name} must be >= 1")
+        if self.seq_days < 0:
+            raise ValueError("seq_days must be >= 0")
+
+    def days_for_status(self, status: WatchStatus) -> int:
+        if status == WatchStatus.DIE:
+            return self.die_days
+        if status == WatchStatus.LIVE:
+            return self.live_days
+        if status == WatchStatus.DONE:
+            return self.done_days
+        return self.cancelled_days
+
+    def seconds_for_status(self, status: WatchStatus) -> int:
+        return self.days_for_status(status) * 86400
+
+    @property
+    def max_watch_days(self) -> int:
+        return max(self.die_days, self.live_days, self.done_days, self.cancelled_days)
+
+    @property
+    def max_watch_ttl_seconds(self) -> int:
+        return self.max_watch_days * 86400
+
+    @property
+    def die_ttl_seconds(self) -> int:
+        return self.die_days * 86400
+
+    @property
+    def pref_ttl_seconds(self) -> int:
+        return self.pref_days * 86400
+
+    @property
+    def seq_ttl_seconds(self) -> int:
+        return self.seq_days * 86400
+
+    def anchor_time(self, item: WatchItem) -> datetime:
+        if item.status == WatchStatus.DIE:
+            return _ensure_utc(item.last_checked_at)
+        if item.status == WatchStatus.LIVE:
+            return _ensure_utc(item.live_detected_at or item.created_at)
+        return _ensure_utc(item.completed_at or item.created_at)
+
+    def remaining_ttl(self, item: WatchItem, now: datetime | None = None) -> int:
+        ref_now = _ensure_utc(now or datetime.now(UTC))
+        anchor = self.anchor_time(item)
+        days = self.days_for_status(item.status)
+        return max(1, int((anchor + timedelta(days=days) - ref_now).total_seconds()))
+
+    def cutoff_ts(
+        self,
+        status: WatchStatus | None = None,
+        now: datetime | None = None,
+    ) -> float:
+        ref_now = _ensure_utc(now or datetime.now(UTC))
+        days = self.days_for_status(status) if status is not None else self.max_watch_days
+        return (ref_now - timedelta(days=days)).timestamp()
 
 
 class DuplicateWatchError(ValueError):
@@ -38,28 +116,18 @@ class RedisWatchRepository:
         self,
         redis: Redis,
         prefix: str = "checklivebot",
-        ttl_days: int = 90,
+        ttl_policy: WatchTtlPolicy | None = None,
     ) -> None:
         self._redis = redis
         self._prefix = prefix
-        self._ttl_days = max(1, ttl_days)
-        self._ttl_seconds = self._ttl_days * 86400
+        self._policy = ttl_policy or WatchTtlPolicy()
+
+    @property
+    def ttl_policy(self) -> WatchTtlPolicy:
+        return self._policy
 
     def _k(self, suffix: str) -> str:
         return f"{self._prefix}:{suffix}"
-
-    def _cutoff_ts(self, now: datetime | None = None) -> float:
-        return ((now or datetime.now(UTC)) - timedelta(days=self._ttl_days)).timestamp()
-
-    def _remaining_ttl(self, created_at: datetime, now: datetime | None = None) -> int:
-        ref_now = now or datetime.now(UTC)
-        aware_created = (
-            created_at if created_at.tzinfo is not None else created_at.replace(tzinfo=UTC)
-        )
-        return max(
-            1,
-            int((aware_created + timedelta(days=self._ttl_days) - ref_now).total_seconds()),
-        )
 
     async def create(
         self,
@@ -91,24 +159,29 @@ class RedisWatchRepository:
             created_at=now,
             last_checked_at=now,
             live_detected_at=now if status == WatchStatus.LIVE else None,
+            completed_at=now if status in (WatchStatus.DONE, WatchStatus.CANCELLED) else None,
         )
-        score = now.timestamp()
+        created_score = now.timestamp()
+        status_score = self._policy.anchor_time(item).timestamp()
+        item_ttl = self._policy.seconds_for_status(status)
+        container_ttl = self._policy.max_watch_ttl_seconds
         chat_key = self._k(f"watches:chat:{chat_id}")
         status_key = self._k(f"watches:chat:{chat_id}:status:{status.value}")
         uid_key = self._k(f"chat_uid:{chat_id}")
         die_key = self._k("watches:die")
         async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.expire(seq_key, self._ttl_seconds)
-            pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=self._ttl_seconds)
-            pipe.zadd(chat_key, {str(watch_id): score})
-            pipe.expire(chat_key, self._ttl_seconds)
-            pipe.zadd(status_key, {str(watch_id): score})
-            pipe.expire(status_key, self._ttl_seconds)
+            if self._policy.seq_ttl_seconds > 0:
+                pipe.expire(seq_key, self._policy.seq_ttl_seconds)
+            pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=item_ttl)
+            pipe.zadd(chat_key, {str(watch_id): created_score})
+            pipe.expire(chat_key, container_ttl)
+            pipe.zadd(status_key, {str(watch_id): status_score})
+            pipe.expire(status_key, item_ttl)
             pipe.hset(uid_key, uid, str(watch_id))
-            pipe.expire(uid_key, self._ttl_seconds)
+            pipe.expire(uid_key, container_ttl)
             if status == WatchStatus.DIE:
                 pipe.sadd(die_key, str(watch_id))
-                pipe.expire(die_key, self._ttl_seconds)
+                pipe.expire(die_key, self._policy.die_ttl_seconds)
             await pipe.execute()
         return item
 
@@ -153,8 +226,10 @@ class RedisWatchRepository:
         *,
         previous_status: WatchStatus | None = None,
     ) -> WatchItem:
-        score = item.created_at.timestamp()
-        item_ttl = self._remaining_ttl(item.created_at)
+        item_ttl = self._policy.remaining_ttl(item)
+        status_ttl = self._policy.seconds_for_status(item.status)
+        status_score = self._policy.anchor_time(item).timestamp()
+        container_ttl = self._policy.max_watch_ttl_seconds
         chat_key = self._k(f"watches:chat:{item.chat_id}")
         status_key = self._k(f"watches:chat:{item.chat_id}:status:{item.status.value}")
         uid_key = self._k(f"chat_uid:{item.chat_id}")
@@ -162,18 +237,19 @@ class RedisWatchRepository:
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=item_ttl)
             pipe.hset(uid_key, item.uid, str(item.id))
-            pipe.expire(uid_key, self._ttl_seconds)
-            pipe.expire(chat_key, self._ttl_seconds)
+            pipe.expire(uid_key, container_ttl)
+            pipe.expire(chat_key, container_ttl)
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
                     self._k(f"watches:chat:{item.chat_id}:status:{previous_status.value}"),
                     str(item.id),
                 )
-                pipe.zadd(status_key, {str(item.id): score})
-            pipe.expire(status_key, self._ttl_seconds)
+            if previous_status is not None:
+                pipe.zadd(status_key, {str(item.id): status_score})
+            pipe.expire(status_key, status_ttl)
             if item.status == WatchStatus.DIE:
                 pipe.sadd(die_key, str(item.id))
-                pipe.expire(die_key, self._ttl_seconds)
+                pipe.expire(die_key, self._policy.die_ttl_seconds)
             else:
                 pipe.srem(die_key, str(item.id))
             await pipe.execute()
@@ -193,7 +269,7 @@ class RedisWatchRepository:
 
     async def count_active_die(self, chat_id: int, *, now: datetime | None = None) -> int:
         key = self._k(f"watches:chat:{chat_id}:status:DIE")
-        cutoff = self._cutoff_ts(now)
+        cutoff = self._policy.cutoff_ts(WatchStatus.DIE, now)
         async with self._redis.pipeline(transaction=False) as pipe:
             pipe.zremrangebyscore(key, "-inf", cutoff)
             pipe.zcard(key)
@@ -235,7 +311,7 @@ class RedisWatchRepository:
             if status_filter
             else self._k(f"watches:chat:{chat_id}")
         )
-        cutoff = self._cutoff_ts(now)
+        cutoff = self._policy.cutoff_ts(status_filter, now)
         if page <= 1:
             async with self._redis.pipeline(transaction=False) as pipe:
                 pipe.zremrangebyscore(key, "-inf", cutoff)
@@ -258,31 +334,62 @@ class RedisWatchRepository:
         if not ids:
             return [], total, total_pages
         raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in ids])
-        items = [WatchItem.model_validate_json(raw) for raw in raws if raw]
+        items: list[WatchItem] = []
+        stale_ids: list[str] = []
+        for wid, raw in zip(ids, raws, strict=True):
+            if raw:
+                items.append(WatchItem.model_validate_json(raw))
+            else:
+                stale_ids.append(str(wid))
+        if stale_ids:
+            await self._redis.zrem(key, *stale_ids)
+            total = max(len(items), total - len(stale_ids))
+            total_pages = max(1, math.ceil(total / page_size))
         return items, total, total_pages
 
+    async def compact_chat_uid(self, chat_id: int) -> int:
+        """Remove dead uid -> watch_id entries whose watch:{id} key has expired."""
+        uid_key = self._k(f"chat_uid:{chat_id}")
+        mapping = cast(dict[str, str], await self._redis.hgetall(uid_key))
+        if not mapping:
+            return 0
+        raws = await self._redis.mget([self._k(f"watch:{wid}") for wid in mapping.values()])
+        stale_uids = [
+            uid for (uid, _), raw in zip(mapping.items(), raws, strict=True) if not raw
+        ]
+        if stale_uids:
+            await self._redis.hdel(uid_key, *stale_uids)
+        return len(stale_uids)
+
     async def get_stats(self, chat_id: int, *, now: datetime | None = None) -> WatchStats:
-        cutoff = self._cutoff_ts(now)
-        keys = (
-            self._k(f"watches:chat:{chat_id}"),
-            self._k(f"watches:chat:{chat_id}:status:DIE"),
-            self._k(f"watches:chat:{chat_id}:status:LIVE"),
-            self._k(f"watches:chat:{chat_id}:status:DONE"),
-            self._k(f"watches:chat:{chat_id}:status:CANCELLED"),
+        statuses = (
+            WatchStatus.DIE,
+            WatchStatus.LIVE,
+            WatchStatus.DONE,
+            WatchStatus.CANCELLED,
         )
+        status_keys = tuple(
+            self._k(f"watches:chat:{chat_id}:status:{status.value}") for status in statuses
+        )
+        uid_key = self._k(f"chat_uid:{chat_id}")
         async with self._redis.pipeline(transaction=False) as pipe:
-            for key in keys:
-                pipe.zremrangebyscore(key, "-inf", cutoff)
-            for key in keys:
+            for status, key in zip(statuses, status_keys, strict=True):
+                pipe.zremrangebyscore(key, "-inf", self._policy.cutoff_ts(status, now))
+            for key in status_keys:
                 pipe.zcard(key)
+            pipe.hlen(uid_key)
             results = await pipe.execute()
-        total, die, live, done, cancelled = results[len(keys) :]
+        die, live, done, cancelled = (int(v) for v in results[len(status_keys) : -1])
+        uid_count = int(results[-1])
+        total = die + live + done + cancelled
+        if uid_count > max(50, total * 2):
+            await self.compact_chat_uid(chat_id)
         return WatchStats(
-            total=int(total),
-            die=int(die),
-            live=int(live),
-            done=int(done),
-            cancelled=int(cancelled),
+            total=total,
+            die=die,
+            live=live,
+            done=done,
+            cancelled=cancelled,
         )
 
     async def get_chat_hidden(self, chat_id: int) -> bool:
@@ -292,7 +399,7 @@ class RedisWatchRepository:
     async def set_chat_hidden(self, chat_id: int, hidden: bool) -> None:
         key = self._k(f"pref:hidden:{chat_id}")
         if hidden:
-            await self._redis.set(key, "1", ex=self._ttl_seconds)
+            await self._redis.set(key, "1", ex=self._policy.pref_ttl_seconds)
         else:
             await self._redis.delete(key)
 
@@ -303,7 +410,7 @@ class RedisWatchRepository:
         watch_key = self._k(f"watch:{watch_id}")
         async with self._redis.pipeline(transaction=False) as pipe:
             if hidden:
-                pipe.set(pref_key, "1", ex=self._ttl_seconds)
+                pipe.set(pref_key, "1", ex=self._policy.pref_ttl_seconds)
             else:
                 pipe.delete(pref_key)
             pipe.get(watch_key)
@@ -322,12 +429,14 @@ class WatchService:
         lock: LockPort | None = None,
         max_active_per_chat: int = 100,
         concurrency: int = 20,
+        notify_lock_ttl_seconds: int = 300,
     ) -> None:
         self._repo = repo
         self._checker = checker
         self._lock = lock
         self._max_active_per_chat = max_active_per_chat
         self._concurrency = max(1, concurrency)
+        self._notify_lock_ttl_seconds = max(30, notify_lock_ttl_seconds)
 
     async def find_by_uid(self, chat_id: int, uid: str) -> WatchItem | None:
         return await self._repo.find_by_uid_with_hidden(chat_id, uid)
@@ -456,7 +565,7 @@ class WatchService:
                 if self._lock is not None:
                     locked = await self._lock.acquire_lock(
                         f"notify:{item.id}",
-                        ttl_seconds=300,
+                        ttl_seconds=self._notify_lock_ttl_seconds,
                     )
                     if not locked:
                         return
@@ -530,6 +639,7 @@ class WatchService:
         if new_status in (WatchStatus.DONE, WatchStatus.CANCELLED):
             item.completed_at = now
         elif new_status == WatchStatus.DIE:
+            item.last_checked_at = now
             item.live_detected_at = None
             item.completed_at = None
         return await self._repo.update(item, previous_status=prev)
@@ -544,12 +654,14 @@ class WatcherScanService:
         lock: LockPort,
         notifier: WatchNotifierPort,
         concurrency: int = 50,
+        notify_lock_ttl_seconds: int = 300,
     ) -> None:
         self._repo = repo
         self._checker = checker
         self._lock = lock
         self._notifier = notifier
         self._concurrency = max(1, concurrency)
+        self._notify_lock_ttl_seconds = max(30, notify_lock_ttl_seconds)
 
     async def scan_once(self) -> int:
         items = await self._repo.list_die_items()
@@ -593,7 +705,10 @@ class WatcherScanService:
                 count = 0
                 for item in uid_items:
                     lock_key = f"notify:{item.id}"
-                    locked = await self._lock.acquire_lock(lock_key, ttl_seconds=300)
+                    locked = await self._lock.acquire_lock(
+                        lock_key,
+                        ttl_seconds=self._notify_lock_ttl_seconds,
+                    )
                     if not locked:
                         continue
                     item.last_checked_at = now

@@ -20,7 +20,12 @@ from src.core.redis import RedisLock, create_redis_client
 from src.modules.bulk.handlers import create_bulk_router
 from src.modules.bulk.service import BulkCheckService
 from src.modules.watch.handlers import TelegramWatchNotifier, create_watch_router
-from src.modules.watch.service import RedisWatchRepository, WatcherScanService, WatchService
+from src.modules.watch.service import (
+    RedisWatchRepository,
+    WatcherScanService,
+    WatchService,
+    WatchTtlPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +80,18 @@ async def run_bot(settings: Settings) -> None:
         max_clients=settings.concurrency,
     )
     lock = RedisLock(redis, prefix=settings.redis_key_prefix)
+    ttl_policy = WatchTtlPolicy(
+        die_days=settings.ttl_die_days,
+        live_days=settings.ttl_live_days,
+        done_days=settings.ttl_done_days,
+        cancelled_days=settings.ttl_cancelled_days,
+        pref_days=settings.ttl_pref_days,
+        seq_days=settings.ttl_seq_days,
+    )
     repo = RedisWatchRepository(
         redis,
         prefix=settings.redis_key_prefix,
-        ttl_days=settings.data_ttl_days,
+        ttl_policy=ttl_policy,
     )
     bot = Bot(
         token=settings.bot_token,
@@ -90,6 +103,7 @@ async def run_bot(settings: Settings) -> None:
         lock=lock,
         max_active_per_chat=settings.max_active_watches_per_chat,
         concurrency=settings.concurrency,
+        notify_lock_ttl_seconds=settings.notify_lock_ttl_seconds,
     )
     bulk_service = BulkCheckService(
         checker=checker,
@@ -103,6 +117,7 @@ async def run_bot(settings: Settings) -> None:
         lock=lock,
         notifier=TelegramWatchNotifier(bot),
         concurrency=settings.concurrency,
+        notify_lock_ttl_seconds=settings.notify_lock_ttl_seconds,
     )
 
     dp = Dispatcher(storage=MemoryStorage())

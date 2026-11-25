@@ -23,6 +23,8 @@ from redis.asyncio import Redis  # noqa: E402
 
 from src.core.config import Settings  # noqa: E402
 from src.core.redis import create_redis_client  # noqa: E402
+from src.modules.watch.domain import WatchItem, WatchStatus  # noqa: E402
+from src.modules.watch.service import WatchTtlPolicy  # noqa: E402
 
 # ANSI Colors cho giao diện Terminal
 C_CYAN = "\033[96m"
@@ -233,6 +235,69 @@ async def flush_all_database(r: Redis) -> None:
     print(f"{C_GREEN}✓ Đã xóa sạch toàn bộ Redis DB.{C_RESET}\n")
 
 
+async def sync_existing_ttls(
+    r: Redis,
+    prefix: str = "checklivebot",
+    policy: WatchTtlPolicy | None = None,
+) -> dict[str, int]:
+    """Đồng bộ lại TTL chuẩn theo WatchTtlPolicy cho toàn bộ key hiện có trong Redis."""
+    active_policy = policy or WatchTtlPolicy()
+    keys = await get_all_keys(r, f"{prefix}:*")
+    summary = {"seq": 0, "pref": 0, "watch": 0, "index": 0, "stale_uids_pruned": 0}
+    now = datetime.now(UTC)
+
+    seq_key = f"{prefix}:seq:watch_id"
+    pref_prefix = f"{prefix}:pref:hidden:"
+    watch_prefix = f"{prefix}:watch:"
+    die_key = f"{prefix}:watches:die"
+    chat_watches_prefix = f"{prefix}:watches:chat:"
+    chat_uid_prefix = f"{prefix}:chat_uid:"
+
+    for key in keys:
+        if key == seq_key:
+            if active_policy.seq_ttl_seconds == 0:
+                await r.persist(key)
+            else:
+                await r.expire(key, active_policy.seq_ttl_seconds)
+            summary["seq"] += 1
+        elif key.startswith(pref_prefix):
+            await r.expire(key, active_policy.pref_ttl_seconds)
+            summary["pref"] += 1
+        elif key.startswith(watch_prefix):
+            raw = await r.get(key)
+            if isinstance(raw, str):
+                with contextlib.suppress(Exception):
+                    item = WatchItem.model_validate_json(raw)
+                    await r.expire(key, active_policy.remaining_ttl(item, now=now))
+                    summary["watch"] += 1
+        elif key == die_key:
+            await r.expire(key, active_policy.die_ttl_seconds)
+            summary["index"] += 1
+        elif key.startswith(chat_watches_prefix):
+            if ":status:" in key:
+                raw_status = key.rsplit(":status:", 1)[-1]
+                with contextlib.suppress(ValueError):
+                    st = WatchStatus(raw_status)
+                    await r.expire(key, active_policy.seconds_for_status(st))
+                    summary["index"] += 1
+            else:
+                await r.expire(key, active_policy.max_watch_ttl_seconds)
+                summary["index"] += 1
+        elif key.startswith(chat_uid_prefix):
+            await r.expire(key, active_policy.max_watch_ttl_seconds)
+            mapping = cast(dict[str, str], await r.hgetall(key))
+            if mapping:
+                uids = list(mapping.keys())
+                raws = await r.mget([f"{prefix}:watch:{mapping[u]}" for u in uids])
+                stale = [u for u, raw_w in zip(uids, raws, strict=True) if not raw_w]
+                if stale:
+                    await r.hdel(key, *stale)
+                    summary["stale_uids_pruned"] += len(stale)
+            summary["index"] += 1
+
+    return summary
+
+
 async def show_group_details(r: Redis, group_name: str, keys: list[str]) -> None:
     """Xem chi tiết một nhóm key, hỗ trợ xuất JSON hoặc xóa nhóm."""
     print(f"\n{C_BOLD}{C_WHITE}=== CHI TIẾT NHÓM: {group_name}:* ({len(keys)} key) ==={C_RESET}\n")
@@ -352,10 +417,19 @@ async def main() -> None:
     parser.add_argument("--info", action="store_true", help="Xem dung lượng và thống kê DB")
     parser.add_argument("--dump", action="store_true", help="Hiển thị JSON Dump toàn bộ Redis")
     parser.add_argument("--export", nargs="?", const="default", help="Xuất Redis ra file JSON")
+    parser.add_argument("--sync-ttl", action="store_true", help="Đồng bộ lại TTL chuẩn cho các key hiện có")
     parser.add_argument("--pattern", default="*", help="Pattern filter khi dump/export")
     args = parser.parse_args()
 
     settings = Settings()
+    policy = WatchTtlPolicy(
+        die_days=settings.ttl_die_days,
+        live_days=settings.ttl_live_days,
+        done_days=settings.ttl_done_days,
+        cancelled_days=settings.ttl_cancelled_days,
+        pref_days=settings.ttl_pref_days,
+        seq_days=settings.ttl_seq_days,
+    )
     r = create_redis_client(settings.redis_url)
     try:
         if args.info:
@@ -365,6 +439,9 @@ async def main() -> None:
         elif args.export:
             fname = None if args.export == "default" else args.export
             await export_db_to_json(r, fname, pattern=args.pattern)
+        elif args.sync_ttl:
+            summary = await sync_existing_ttls(r, settings.redis_key_prefix, policy)
+            print(f"{C_GREEN}✓ Đã đồng bộ TTL chuẩn: {summary}{C_RESET}\n")
         else:
             await run_interactive_menu(r, settings.redis_key_prefix)
     finally:
@@ -421,6 +498,37 @@ async def test_redis_manager_helpers_offline(tmp_path: Path) -> None:
 
     await flush_all_database(r)
     assert await get_all_keys(r) == []
+
+    # Verify sync_existing_ttls normalizes legacy 90d TTLs & prunes dead chat_uid entries
+    now = datetime.now(UTC)
+    item_cancelled = WatchItem(
+        id=10,
+        chat_id=100,
+        owner_user_id=1,
+        uid="100010",
+        note="Cancelled",
+        price="0",
+        status=WatchStatus.CANCELLED,
+        created_at=now,
+        last_checked_at=now,
+        completed_at=now,
+    )
+    await r.set("checklivebot:seq:watch_id", "10", ex=90 * 86400)
+    await r.set("checklivebot:pref:hidden:100", "1", ex=90 * 86400)
+    await r.set("checklivebot:watch:10", item_cancelled.model_dump_json(), ex=90 * 86400)
+    await r.zadd("checklivebot:watches:chat:100", {"10": now.timestamp()})
+    await r.zadd("checklivebot:watches:chat:100:status:CANCELLED", {"10": now.timestamp()})
+    await r.hset("checklivebot:chat_uid:100", "100010", "10")
+    await r.hset("checklivebot:chat_uid:100", "999999", "999")
+
+    summary = await sync_existing_ttls(r, "checklivebot", WatchTtlPolicy())
+    assert summary == {"seq": 1, "pref": 1, "watch": 1, "index": 3, "stale_uids_pruned": 1}
+    assert await r.ttl("checklivebot:seq:watch_id") == -1
+    assert 364 * 86400 < await r.ttl("checklivebot:pref:hidden:100") <= 365 * 86400
+    assert 13 * 86400 < await r.ttl("checklivebot:watch:10") <= 14 * 86400
+    assert 13 * 86400 < await r.ttl("checklivebot:watches:chat:100:status:CANCELLED") <= 14 * 86400
+    assert 89 * 86400 < await r.ttl("checklivebot:watches:chat:100") <= 90 * 86400
+    assert await r.hgetall("checklivebot:chat_uid:100") == {"100010": "10"}
     await r.aclose()
 
 

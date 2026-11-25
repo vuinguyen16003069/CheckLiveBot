@@ -2,12 +2,12 @@
 
 [![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![aiogram 3](https://img.shields.io/badge/aiogram-3.x-26A5E4?logo=telegram&logoColor=white)](https://docs.aiogram.dev/)
-[![Redis 8](https://img.shields.io/badge/Redis-RAM%2090d%20TTL-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Redis 8](https://img.shields.io/badge/Redis-Tiered%20TTL-DC382D?logo=redis&logoColor=white)](https://redis.io/)
 [![Ruff](https://img.shields.io/badge/Code%20Style-Ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
 [![Pyright Strict](https://img.shields.io/badge/Types-Pyright%20Strict-3178C6?logo=typescript&logoColor=white)](https://github.com/microsoft/pyright)
 [![Deploy](https://img.shields.io/badge/Deploy-Docker%20%26%20Heroku-430098?logo=docker&logoColor=white)](https://www.docker.com/)
 
-Telegram Bot kiểm tra trạng thái **LIVE / DIE UID Facebook** tốc độ cao và **theo dõi kèo tự động (`DIE → LIVE`)**, thiết kế theo kiến trúc **Single-Process Asyncio Modular Clean Architecture** tối giản phụ thuộc thư viện, dùng **Redis** lưu kèo (tự dọn sau `90` ngày) và **`curl_cffi`** giả lập TLS trình duyệt Chrome.
+Telegram Bot kiểm tra trạng thái **LIVE / DIE UID Facebook** tốc độ cao và **theo dõi kèo tự động (`DIE → LIVE`)**, thiết kế theo kiến trúc **Single-Process Asyncio Modular Clean Architecture** tối giản phụ thuộc thư viện, dùng **Redis** lưu kèo với **TTL phân tầng tự dọn rác** (`DIE` 90d, `LIVE` 60d, `DONE` 30d, `CANCELLED` 14d, `pref` 365d, `seq` vĩnh viễn) và **`curl_cffi`** giả lập TLS trình duyệt Chrome.
 
 ---
 
@@ -56,7 +56,7 @@ Dự án chỉ giữ lại đúng **4 thư viện runtime cốt lõi** (+ `pydan
 | **Runtime & Packaging** | Python `3.12+`, `uv`, `uvloop` *(Linux)* | Quản lý lockfile `uv.lock`; `uvloop` tăng tốc I/O 2–4× trên Linux/Docker/Heroku |
 | **Telegram Bot** | `aiogram 3.x` | Async 100%, Long Polling, FSM `MemoryStorage` có khôi phục draft từ tin nhắn |
 | **HTTP & Anti-Ban** | `curl_cffi` | Giả lập Chrome TLS JA3/JA4, HTTP/2, stateless cookie, HTTP/SOCKS5 proxy |
-| **Lưu trữ & Khóa** | `redis` (`redis.asyncio`) | Lưu kèo (`String`/`Hash`/`Set`/`ZSet`, TTL 90 ngày) & `RedisLock` (`SET NX EX`) |
+| **Lưu trữ & Khóa** | `redis` (`redis.asyncio`) | Lưu kèo (`String`/`Hash`/`Set`/`ZSet`, TTL phân tầng theo trạng thái) & `RedisLock` (`SET NX EX`) |
 | **Config & Logging** | `pydantic` + Python stdlib (`logging`, `pathlib`) | Validate `.env` ngay khi khởi động; formatter `console` (dev) & `json` (prod) |
 | **Quality Assurance** *(dev)* | `ruff`, `pyright` (strict), `pytest`, `fakeredis` | Lint, format, kiểm tra kiểu nghiêm ngặt và 49 unit tests chạy offline |
 
@@ -293,7 +293,13 @@ Toàn bộ cấu hình được định nghĩa và kiểm tra hợp lệ tại [
 | `PROXY_LIST` | Không | `""` | Phân tách dấu `,` | Danh sách proxy xoay IP (`http://`, `socks5://`, `socks5h://`) |
 | `CONCURRENCY` | Không | `100` | `1 – 500` | Số request check Facebook chạy đồng thời tối đa |
 | `POLL_INTERVAL_SECONDS` | Không | `10` | `>= 3` | Chu kỳ quét nền các kèo `DIE` (giây) |
-| `DATA_TTL_DAYS` | Không | `90` | `>= 1` | Thời gian lưu kèo trên Redis (ngày) |
+| `TTL_DIE_DAYS` | Không | `90` | `>= 1` | TTL cho kèo đang theo dõi `DIE` và `watches:die` (ngày) |
+| `TTL_LIVE_DAYS` | Không | `60` | `>= 1` | TTL cho kèo đã về `LIVE`, tính từ thời điểm phát hiện LIVE (ngày) |
+| `TTL_DONE_DAYS` | Không | `30` | `>= 1` | TTL cho kèo đã `DONE`, tính từ lúc hoàn tất (ngày) |
+| `TTL_CANCELLED_DAYS` | Không | `14` | `>= 1` | TTL cho kèo đã `CANCELLED`, tính từ lúc hủy (ngày) |
+| `TTL_PREF_DAYS` | Không | `365` | `>= 1` | TTL cho cài đặt ẩn thông tin `pref:hidden:{chat_id}` (ngày) |
+| `TTL_SEQ_DAYS` | Không | `0` | `>= 0` | TTL cho bộ đếm ID `seq:watch_id` (`0` = vĩnh viễn, không reset ID) |
+| `NOTIFY_LOCK_TTL_SECONDS` | Không | `300` | `>= 30` | TTL khóa chống gửi trùng thông báo LIVE (giây) |
 | `HTTP_TIMEOUT_SECONDS` | Không | `5.0` | `> 0.5` | Timeout tối đa mỗi request Facebook (connect tự động `<= 2.0s`) |
 | `MAX_RETRIES` | Không | `2` | `1 – 10` | Số lần retry (đổi proxy khỏe + backoff jitter) khi lỗi mạng / `403` / `429` / `5xx` |
 | `VERIFY_DELAY_SECONDS` | Không | `0.5` | `0.0 – 5.0` | Độ trễ giữa lớp kiểm tra 1 và lớp xác minh kép 2 khi phát hiện `LIVE` |

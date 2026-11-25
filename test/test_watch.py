@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -26,6 +25,7 @@ from src.modules.watch.service import (
     RedisWatchRepository,
     WatcherScanService,
     WatchService,
+    WatchTtlPolicy,
 )
 from src.modules.watch.ui import (
     DealDraft,
@@ -302,11 +302,11 @@ async def test_watch_service_lifecycle_pagination_recheck_and_isolation() -> Non
     with pytest.raises(ValueError, match="Không tìm thấy kèo"):
         await svc.update_watch(200, w1.id, note="Hack", price="0", faq="")
 
-    # Global per-chat hide preference persists across all watches in chat 100
+    # Global per-chat hide preference persists across all watches in chat 100 (365-day TTL)
     w1_hidden = await svc.set_hidden(chat_id=100, watch_id=w1.id, hidden=True)
     assert w1_hidden.is_hidden is True
     ttl_pref = await redis.ttl("test:pref:hidden:100")
-    assert 89 * 86400 < ttl_pref <= 90 * 86400
+    assert 364 * 86400 < ttl_pref <= 365 * 86400
     assert (await svc.get_watch(chat_id=100, watch_id=w2.id)).is_hidden is True
 
     # update_watch preserves is_hidden and normalizes blanks / "-"
@@ -400,57 +400,92 @@ async def test_watcher_double_verify_dedupe_and_lock() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unified_90d_ttl_on_all_keys_and_lazy_prune() -> None:
+async def test_tiered_ttl_policy_lazy_prune_reopen_and_chat_uid_compaction() -> None:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
-    repo = RedisWatchRepository(redis, prefix="test", ttl_days=90)
+    policy = WatchTtlPolicy(
+        die_days=90,
+        live_days=60,
+        done_days=30,
+        cancelled_days=14,
+        pref_days=365,
+        seq_days=0,
+    )
+    repo = RedisWatchRepository(redis, prefix="test", ttl_policy=policy)
     checker = _StubChecker(
         {
             "100001": CheckOutcome.DIE,
             "100002": CheckOutcome.LIVE,
             "100003": CheckOutcome.DIE,
+            "100004": CheckOutcome.DIE,
         }
     )
     svc = WatchService(repo=repo, checker=checker)
 
-    w_die = await svc.add_watch(100, 1, "100001 | Old DIE | 10k")
-    w_live = await svc.add_watch(100, 1, "100002 | Recent LIVE | 20k")
-    w_done = await svc.add_watch(100, 1, "100003 | Old Done | 30k")
+    w_die = await svc.add_watch(100, 1, "100001 | Active DIE | 10k")
+    w_live = await svc.add_watch(100, 1, "100002 | Active LIVE | 20k")
+    w_done = await svc.add_watch(100, 1, "100003 | Done Deal | 30k")
     w_done = await svc.mark_status(100, w_done.id, WatchStatus.DONE)
+    w_cancel = await svc.add_watch(100, 1, "100004 | Cancelled Deal | 40k")
+    w_cancel = await svc.mark_status(100, w_cancel.id, WatchStatus.CANCELLED)
     await svc.set_hidden(100, w_die.id, True)
 
-    # Zero watches:expiry key; every single key in Redis MUST have ~90-day TTL
-    all_keys = [k async for k in cast(AsyncIterator[str], redis.scan_iter("*"))]
-    assert len(all_keys) > 0
-    assert "test:watches:expiry" not in all_keys
-    for key in all_keys:
-        ttl = await redis.ttl(key)
-        assert 89 * 86400 < ttl <= 90 * 86400, f"Key {key} missing 90d TTL (ttl={ttl})"
+    # Verify exact tiered TTL per key type
+    assert await redis.ttl("test:seq:watch_id") == -1  # permanent
+    assert 364 * 86400 < await redis.ttl("test:pref:hidden:100") <= 365 * 86400
+    assert 89 * 86400 < await redis.ttl(f"test:watch:{w_die.id}") <= 90 * 86400
+    assert 59 * 86400 < await redis.ttl(f"test:watch:{w_live.id}") <= 60 * 86400
+    assert 29 * 86400 < await redis.ttl(f"test:watch:{w_done.id}") <= 30 * 86400
+    assert 13 * 86400 < await redis.ttl(f"test:watch:{w_cancel.id}") <= 14 * 86400
 
-    # Simulate w_die & w_done aged 95 days (Redis TTL expired their watch:* keys)
-    old_ts = (datetime.now(UTC) - timedelta(days=95)).timestamp()
-    await redis.zadd("test:watches:chat:100", {str(w_die.id): old_ts, str(w_done.id): old_ts})
-    await redis.zadd("test:watches:chat:100:status:DIE", {str(w_die.id): old_ts})
-    await redis.zadd("test:watches:chat:100:status:DONE", {str(w_done.id): old_ts})
-    await redis.delete(f"test:watch:{w_die.id}", f"test:watch:{w_done.id}")
+    # Container keys MUST stay at max watch TTL (90d), never shortened to 14d by CANCELLED
+    assert 89 * 86400 < await redis.ttl("test:watches:chat:100") <= 90 * 86400
+    assert 89 * 86400 < await redis.ttl("test:chat_uid:100") <= 90 * 86400
+    assert 89 * 86400 < await redis.ttl("test:watches:die") <= 90 * 86400
+    assert 13 * 86400 < await redis.ttl("test:watches:chat:100:status:CANCELLED") <= 14 * 86400
 
-    # Inject a non-DIE stale id into watches:die to verify list_die_items prunes both kinds
-    await redis.sadd("test:watches:die", str(w_live.id))
+    # Old DIE (created 85 days ago) turning LIVE gets a fresh 60d from live_detected_at
+    w_die.created_at = datetime.now(UTC) - timedelta(days=85)
+    w_die.status = WatchStatus.LIVE
+    w_die.live_detected_at = datetime.now(UTC)
+    await repo.update(w_die, previous_status=WatchStatus.DIE)
+    assert 59 * 86400 < await redis.ttl(f"test:watch:{w_die.id}") <= 60 * 86400
 
-    # On-demand pruning via ZREMRANGEBYSCORE & lazy SREM/HDEL (no background cron!)
+    # Reopening an old item back to DIE resets last_checked_at and grants a fresh 90d TTL
+    reopened = await svc.mark_status(100, w_die.id, WatchStatus.DIE)
+    assert reopened.status == WatchStatus.DIE
+    assert 89 * 86400 < await redis.ttl(f"test:watch:{w_die.id}") <= 90 * 86400
+
+    # Simulate w_cancel aged 16 days (>14d) & w_done aged 35 days (>30d), with Redis TTL expired
+    ts_16d = (datetime.now(UTC) - timedelta(days=16)).timestamp()
+    ts_35d = (datetime.now(UTC) - timedelta(days=35)).timestamp()
+    await redis.zadd("test:watches:chat:100:status:CANCELLED", {str(w_cancel.id): ts_16d})
+    await redis.zadd("test:watches:chat:100:status:DONE", {str(w_done.id): ts_35d})
+    await redis.delete(f"test:watch:{w_cancel.id}", f"test:watch:{w_done.id}")
+
+    # get_stats() prunes per-status cutoffs so total == die + live + done + cancelled
     stats = await svc.get_stats(100)
-    assert (stats.total, stats.die, stats.live, stats.done, stats.cancelled) == (1, 0, 1, 0, 0)
+    assert (stats.total, stats.die, stats.live, stats.done, stats.cancelled) == (2, 1, 1, 0, 0)
 
+    # ALL tab lazily ZREMs items whose shorter status TTL expired before max_watch_days
     items, total, _ = await svc.list_watches(100)
-    assert total == 1
-    assert [it.id for it in items] == [w_live.id]
+    assert total == 2
+    assert {it.id for it in items} == {w_die.id, w_live.id}
+    assert await redis.zcard("test:watches:chat:100") == 2
 
-    assert await repo.list_die_items() == []
-    assert cast(int, await redis.scard("test:watches:die")) == 0  # type: ignore[misc]
+    # Inject >50 dead chat_uid entries -> get_stats() triggers opportunistic compaction
+    async with redis.pipeline(transaction=False) as pipe:
+        for i in range(60):
+            pipe.hset("test:chat_uid:100", f"9000{i:03d}", str(9000 + i))
+        await pipe.execute()
+    assert await redis.hlen("test:chat_uid:100") >= 62
+    await svc.get_stats(100)
+    remaining_uids = cast(dict[str, str], await redis.hgetall("test:chat_uid:100"))
+    assert remaining_uids == {w_die.uid: str(w_die.id), w_live.uid: str(w_live.id)}
 
-    # Expired UID is lazily pruned from chat_uid and unlocked for re-adding
-    assert await svc.find_by_uid(100, "100001") is None
-    re_added = await svc.add_watch(100, 1, "100001 | Re-added | 50k")
-    assert re_added.uid == "100001"
+    # Expired UID is unlocked for re-adding
+    assert await svc.find_by_uid(100, "100004") is None
+    re_added = await svc.add_watch(100, 1, "100004 | Re-added | 50k")
+    assert re_added.uid == "100004"
     await redis.aclose()
 
 

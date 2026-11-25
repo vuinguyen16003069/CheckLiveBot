@@ -162,7 +162,7 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
 
         async def _attach_keyboard() -> Message:
-            return await message.answer("⚡", reply_markup=build_reply_keyboard())
+            return await message.answer("...", reply_markup=build_reply_keyboard())
 
         tmp, stats = await asyncio.gather(
             _attach_keyboard(),
