@@ -175,23 +175,15 @@ def build_watch_keyboard(
     back_status: str | None = "ALL",
     back_page: int = 1,
 ) -> InlineKeyboardMarkup:
-    toggle_btn = (
-        InlineKeyboardButton(
-            text="🐵 Hiện thông tin",
-            callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
-        )
-        if item.is_hidden
-        else InlineKeyboardButton(
-            text="🙈 Ẩn thông tin",
-            callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
-        )
-    )
     rows: list[list[InlineKeyboardButton]] = [
         [
-            toggle_btn,
             InlineKeyboardButton(
-                text="🔗 Mở Facebook",
-                url=f"https://www.facebook.com/profile.php?id={item.uid}",
+                text="🙈 Ẩn thông tin",
+                callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
+            ),
+            InlineKeyboardButton(
+                text="🐵 Hiện thông tin",
+                callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
             ),
         ],
     ]

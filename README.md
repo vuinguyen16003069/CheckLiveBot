@@ -238,7 +238,7 @@ flowchart TD
 **Bộ nút Inline trên thẻ kèo & thông báo LIVE:**
 - `🙈 Ẩn thông tin` / `🐵 Hiện thông tin` *(che mờ bằng spoiler theo từng chat, lưu 1 pipeline)*
 - `❌ Hủy kèo` | `✅ Done kèo` | `✏️ Sửa` | `🗑 Xóa` *(có bước xác nhận)*
-- `🔄 Tiếp tục theo dõi` | `🔙 Về danh sách` | `🔗 Mở Facebook`
+- `🔄 Tiếp tục theo dõi` | `🔙 Về danh sách`
 
 ---
 

@@ -220,13 +220,12 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
 
     die_kb = build_watch_keyboard(sample_item)
-    assert [btn.text for btn in die_kb.inline_keyboard[0]] == ["🙈 Ẩn thông tin", "🔗 Mở Facebook"]
-    assert die_kb.inline_keyboard[0][1].url == "https://www.facebook.com/profile.php?id=10001"
+    assert [btn.text for btn in die_kb.inline_keyboard[0]] == [
+        "🙈 Ẩn thông tin",
+        "🐵 Hiện thông tin",
+    ]
     assert [btn.text for btn in die_kb.inline_keyboard[1]] == ["❌ Hủy kèo", "🗑 Xóa"]
     assert [btn.text for btn in die_kb.inline_keyboard[2]] == ["✏️ Sửa", "🔙 Về danh sách"]
-
-    hidden_kb = build_watch_keyboard(sample_item.model_copy(update={"is_hidden": True}))
-    assert hidden_kb.inline_keyboard[0][0].text == "🐵 Hiện thông tin"
 
     live_item = sample_item.model_copy(update={"status": WatchStatus.LIVE})
     live_kb = build_watch_keyboard(live_item)
