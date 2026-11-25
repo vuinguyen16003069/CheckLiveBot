@@ -211,7 +211,7 @@ flowchart TD
     L1 -- "LIVE" --> L2["Lớp 2 (trong Semaphore): verify_live(uid)\nRequest độc lập sau 0.5s"]
     L2 -- "Không phải LIVE" --> SKIP
     L2 -- "Xác nhận LIVE" --> REL["Nhả Semaphore HTTP ngay"]
-    REL --> LOCK["RedisLock: SET lock:notify:{id} NX EX 300\n(dùng chung với nút Quét lại DIE)"]
+    REL --> LOCK["RedisLock: SET lock:notify:{id} NX EX 300"]
     LOCK -- "Đã có khóa" --> SKIP
     LOCK -- "Giữ được khóa" --> NOTIFY["Gửi TelegramWatchNotifier.notify_live(item)"]
     NOTIFY -- "Thành công" --> UPD["Cập nhật Redis: DIE → LIVE"]
@@ -238,7 +238,7 @@ flowchart TD
 **Bộ nút Inline trên thẻ kèo & thông báo LIVE:**
 - `🙈 Ẩn thông tin` / `🐵 Hiện thông tin` *(che mờ bằng spoiler theo từng chat, lưu 1 pipeline)*
 - `❌ Hủy kèo` | `✅ Done kèo` | `✏️ Sửa` | `🗑 Xóa` *(có bước xác nhận)*
-- `🔄 Tiếp tục theo dõi` | `🔙 Về danh sách` | `🔄 Quét lại DIE`
+- `🔄 Tiếp tục theo dõi` | `🔙 Về danh sách` | `🔗 Mở Facebook`
 
 ---
 

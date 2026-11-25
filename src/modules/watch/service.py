@@ -561,62 +561,6 @@ class WatchService:
     async def get_stats(self, chat_id: int) -> WatchStats:
         return await self._repo.get_stats(chat_id)
 
-    async def recheck_chat(
-        self,
-        chat_id: int,
-        target_uid: str | None = None,
-    ) -> tuple[int, list[WatchItem]]:
-        items, _, _ = await self._repo.list_chat_items(
-            chat_id,
-            status_filter=WatchStatus.DIE,
-            page=1,
-            page_size=500,
-        )
-        if target_uid:
-            items = [i for i in items if i.uid == target_uid]
-        if not items:
-            return 0, []
-
-        sem = asyncio.Semaphore(self._concurrency)
-        turned_live: list[WatchItem] = []
-
-        async def _check_item(item: WatchItem) -> None:
-            try:
-                async with sem:
-                    res = await self._checker.check(item.uid)
-                if res.outcome != CheckOutcome.LIVE:
-                    return
-                verified = await self._checker.verify_live(item.uid)
-                if verified.outcome != CheckOutcome.LIVE:
-                    return
-                fb_name, avatar_url = await self._checker.fetch_profile_info(item.uid)
-                now = datetime.now(UTC)
-                item.last_checked_at = now
-                if self._lock is not None:
-                    locked = await self._lock.acquire_lock(
-                        f"notify:{item.id}",
-                        ttl_seconds=self._notify_lock_ttl_seconds,
-                    )
-                    if not locked:
-                        return
-                item.status = WatchStatus.LIVE
-                item.live_detected_at = now
-                if fb_name:
-                    item.fb_name = fb_name
-                if avatar_url:
-                    item.avatar_url = avatar_url
-                await self._repo.update(item, previous_status=WatchStatus.DIE)
-                turned_live.append(item)
-            except Exception as exc:
-                logger.warning("recheck_item_error watch_id=%s error=%s", item.id, exc)
-
-        await asyncio.gather(*(_check_item(i) for i in items))
-        if turned_live:
-            is_hidden = await self._repo.get_chat_hidden(chat_id)
-            for item in turned_live:
-                item.is_hidden = is_hidden
-        return len(items), turned_live
-
     async def _require_owned(self, chat_id: int, watch_id: int) -> WatchItem:
         item, is_hidden = await self._repo.get_with_hidden(chat_id, watch_id)
         if item is None or item.chat_id != chat_id:

@@ -35,7 +35,6 @@ from src.modules.watch.ui import (
     ListLookupStates,
     ListPageCallback,
     QuickWatchCallback,
-    RecheckAllCallback,
     WatchActionCallback,
     WizardCallback,
     WizardStates,
@@ -369,32 +368,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def cmd_stats(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(format_watch_stats(await watch_service.get_stats(message.chat.id)))
-
-    @router.callback_query(RecheckAllCallback.filter())
-    async def cb_recheck_all(query: CallbackQuery) -> None:
-        msg = await _callback_message(query)
-        if msg is None:
-            return
-        scanned, turned_live = await watch_service.recheck_chat(msg.chat.id)
-        if scanned == 0:
-            with contextlib.suppress(TelegramBadRequest):
-                await query.answer("📭 Không có kèo DIE nào cần quét lại.")
-            return
-        toast = (
-            f"🔄 Đã quét {scanned} kèo DIE — {len(turned_live)} kèo về LIVE!"
-            if turned_live
-            else f"🔄 Đã quét {scanned} kèo DIE — chưa có kèo nào về LIVE."
-        )
-        with contextlib.suppress(TelegramBadRequest):
-            await query.answer(toast)
-        for item in turned_live:
-            await _answer_watch_card(
-                msg,
-                item,
-                title="🔔 🟢 THÔNG BÁO TÀI KHOẢN ĐÃ LIVE!",
-                reply_markup=build_watch_keyboard(item),
-                watch_service=watch_service,
-            )
 
     @router.callback_query(QuickWatchCallback.filter())
     async def cb_quick_watch(

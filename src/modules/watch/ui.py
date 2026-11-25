@@ -27,10 +27,6 @@ class ListLookupStates(StatesGroup):
     waiting_uid = State()
 
 
-class RecheckAllCallback(CallbackData, prefix="ra"):
-    pass
-
-
 class WatchActionCallback(CallbackData, prefix="w"):
     action: str
     watch_id: int
@@ -100,8 +96,8 @@ def build_wizard_keyboard(step: int, *, min_step: int = 1) -> InlineKeyboardMark
                     callback_data=WizardCallback(action="pick_faq", value="956").pack(),
                 ),
                 InlineKeyboardButton(
-                    text="⏭ Bỏ qua",
-                    callback_data=WizardCallback(action="skip_faq").pack(),
+                    text="583",
+                    callback_data=WizardCallback(action="pick_faq", value="583").pack(),
                 ),
             ]
         )
@@ -138,7 +134,7 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
         prompts = {
             2: "📝 <b>Bước 1/3 — Nhập ghi chú mới</b> cho kèo (VD: <code>Kèo 1</code>):",
             3: "💰 <b>Bước 2/3 — Chọn nhanh giá mới bên dưới</b> hoặc gõ giá bất kỳ:",
-            4: "❓ <b>Bước 3/3 — Chọn nhanh FAQ mới bên dưới</b>, gõ lưu ý, hoặc bấm <b>Bỏ qua</b>:",
+            4: "❓ <b>Bước 3/3 — Chọn nhanh FAQ mới bên dưới</b> hoặc gõ lưu ý bất kỳ (gõ <code>-</code> để bỏ trống):",
         }
     else:
         header = "📌 <b>LÊN KÈO NHANH</b>"
@@ -146,7 +142,7 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
             1: "🆔 <b>Bước 1/4 — Nhập UID</b> (hoặc dán link Facebook):",
             2: "📝 <b>Bước 2/4 — Nhập ghi chú</b> cho kèo (VD: <code>Kèo 1</code>):",
             3: "💰 <b>Bước 3/4 — Chọn nhanh giá bên dưới</b> hoặc gõ giá bất kỳ:",
-            4: "❓ <b>Bước 4/4 — Chọn nhanh FAQ bên dưới</b>, gõ lưu ý, hoặc bấm <b>Bỏ qua</b>:",
+            4: "❓ <b>Bước 4/4 — Chọn nhanh FAQ bên dưới</b> hoặc gõ lưu ý bất kỳ (gõ <code>-</code> để bỏ trống):",
         }
     body = ("\n" + "\n".join(summary) + "\n") if summary else ""
     return f"{header}\n{body}\n👉 {prompts[step]}"
@@ -334,12 +330,4 @@ def build_list_keyboard(
                 )
             )
         rows.append(nav_row)
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔄 Quét lại DIE",
-                callback_data=RecheckAllCallback().pack(),
-            ),
-        ]
-    )
     return InlineKeyboardMarkup(inline_keyboard=rows)

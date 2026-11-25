@@ -183,12 +183,12 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert any("Quay lại" in btn.text for btn in kb3.inline_keyboard[1])
 
     kb4 = build_wizard_keyboard(step=4)
-    assert any(btn.text == "282" for btn in kb4.inline_keyboard[0])
+    assert [btn.text for btn in kb4.inline_keyboard[0]] == ["282", "956", "583"]
 
     sample_item = WatchItem(id=7, chat_id=1, owner_user_id=1, uid="10001", note="N", price="0")
     list_kb = build_list_keyboard("ALL", 2, 3)
     flat_texts = [btn.text for row in list_kb.inline_keyboard for btn in row]
-    assert "🔄 Quét lại DIE" in flat_texts
+    assert "🔄 Quét lại DIE" not in flat_texts
     assert "◀️" in flat_texts
     assert "▶️" in flat_texts
     assert "📄 2/3" in flat_texts
@@ -340,21 +340,6 @@ async def test_watch_service_lifecycle_pagination_recheck_and_isolation() -> Non
     w1_resumed = await svc.mark_status(chat_id=100, watch_id=w1.id, new_status=WatchStatus.DIE)
     assert w1_resumed.status == WatchStatus.DIE
     assert w1_resumed.completed_at is None
-
-    # recheck_chat: 100001 verified LIVE, 100003 false LIVE rejected at layer 2
-    checker.mapping["100001"] = CheckOutcome.LIVE
-    checker.mapping["100003"] = CheckOutcome.LIVE
-    checker.verify_mapping["100001"] = (CheckOutcome.LIVE, "OK")
-    checker.verify_mapping["100003"] = (CheckOutcome.DIE, None)
-
-    scanned, turned_live = await svc.recheck_chat(100)
-    assert scanned == 2
-    assert [it.id for it in turned_live] == [w1.id]
-
-    # target_uid filter & empty recheck
-    scanned_one, live_one = await svc.recheck_chat(100, target_uid="100003")
-    assert (scanned_one, live_one) == (1, [])
-    assert await svc.recheck_chat(999) == (0, [])
 
     # Multi-page pagination clamping (add 12 more items to chat 300)
     for i in range(12):
@@ -606,12 +591,11 @@ async def test_watcher_isolates_transient_notify_failure_and_recheck_uses_lock()
     assert await scanner.scan_once() == 1
     assert notifier.notified == [200, 100]
 
-    # recheck_chat respects shared RedisLock so it never duplicates a LIVE alert
+    # Scanner respects shared RedisLock so it never duplicates a LIVE alert
     checker.mapping["100021"] = CheckOutcome.LIVE
     checker.verify_mapping["100021"] = (CheckOutcome.LIVE, "OK")
     assert await lock.acquire_lock(f"notify:{w_locked.id}", ttl_seconds=60) is True
-    scanned, turned_live = await svc.recheck_chat(300)
-    assert (scanned, turned_live) == (1, [])
+    assert await scanner.scan_once() == 0
     await redis.aclose()
 
 
@@ -865,12 +849,6 @@ async def test_watch_router_commands_wizard_and_callbacks_end_to_end() -> None:
     await cb_handlers["cb_quick_watch"](q_qw_new, QuickWatchCallback(uid="100099"), state)
     q_qw_new.answer.assert_awaited_once()
 
-    checker.mapping["100050"] = CheckOutcome.LIVE
-    checker.verify_mapping["100050"] = (CheckOutcome.LIVE, "OK")
-    q_ra = MagicMock(message=_msg(), answer=AsyncMock())
-    await cb_handlers["cb_recheck_all"](q_ra)
-    q_ra.message.answer_photo.assert_awaited_once()
-
     # 5. cb_watch_action: hide/show toggle spoiler via edit_media on photo; others edit_caption
     for act, expected_spoiler in (("hide", True), ("show", False)):
         m_photo = _msg(photo=[MagicMock(file_id="fid_1")])
@@ -1003,10 +981,6 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
 
     w80 = await svc.add_watch(20, 1, "100080")
     await svc.add_watch(20, 1, "100081")
-    fail_checker.mapping["100080"] = CheckOutcome.LIVE
-    # target_uid filters to 100080; verify_live rejects LIVE -> 0 turned_live
-    scanned, turned = await svc.recheck_chat(20, target_uid="100080")
-    assert (scanned, turned) == (1, [])
 
     with pytest.raises(ValueError, match="Không tìm thấy kèo"):
         await svc.set_hidden(999, w80.id, True)
@@ -1083,16 +1057,8 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
 
     # Non-Message callback returns cleanly
     q_no_msg = MagicMock(message=None, answer=AsyncMock())
-    await cb_handlers["cb_recheck_all"](q_no_msg)
+    await cb_handlers["cb_wizard"](q_no_msg, WizardCallback(action="cancel"), state)
     q_no_msg.answer.assert_awaited_once()
-
-    # Empty recheck_all on chat with no DIE items shows toast only (no chat message)
-    m_empty_rc = MagicMock(spec=Message, chat=MagicMock(id=9999), answer=AsyncMock())
-    q_empty_rc = MagicMock(message=m_empty_rc, answer=AsyncMock())
-    await cb_handlers["cb_recheck_all"](q_empty_rc)
-    q_empty_rc.answer.assert_awaited_once()
-    assert "Không có kèo DIE" in q_empty_rc.answer.call_args.args[0]
-    m_empty_rc.answer.assert_not_awaited()
 
     # Concurrent add_watch with RedisLock prevents duplicate creation
     add_lock = RedisLock(redis, prefix="edge")
