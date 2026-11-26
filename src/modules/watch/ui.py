@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import re
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.fsm.state import State, StatesGroup
@@ -146,27 +145,6 @@ def format_wizard_step(step: int, draft: DealDraft) -> str:
         }
     body = ("\n" + "\n".join(summary) + "\n") if summary else ""
     return f"{header}\n{body}\n👉 {prompts[step]}"
-
-
-_EDIT_WATCH_RE = re.compile(r"SỬA KÈO #(\d+)")
-_UID_DRAFT_RE = re.compile(r"UID:\s*([A-Za-z0-9._-]{1,50})")
-_NOTE_DRAFT_RE = re.compile(r"Ghi chú:\s*(.+)")
-_PRICE_DRAFT_RE = re.compile(r"Giá:\s*(.+)")
-
-
-def recover_draft_from_text(text: str | None) -> DealDraft:
-    if not text:
-        return DealDraft()
-    edit_m = _EDIT_WATCH_RE.search(text)
-    uid_m = _UID_DRAFT_RE.search(text)
-    note_m = _NOTE_DRAFT_RE.search(text)
-    price_m = _PRICE_DRAFT_RE.search(text)
-    return DealDraft(
-        uid=uid_m.group(1).strip() if uid_m else "",
-        note=note_m.group(1).strip() if note_m else "",
-        price=price_m.group(1).strip() if price_m else "",
-        edit_watch_id=int(edit_m.group(1)) if edit_m else None,
-    )
 
 
 def build_watch_keyboard(

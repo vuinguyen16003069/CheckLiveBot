@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
+from aiogram.types import Message
 
 from src.core.ports import CheckOutcome, UidCheckResult
 from src.core.redis import RedisLock
@@ -20,6 +22,7 @@ from src.modules.watch.domain import (
     format_welcome_dashboard,
     parse_add_line,
 )
+from src.modules.watch.handlers import create_watch_router
 from src.modules.watch.service import (
     DuplicateWatchError,
     RedisWatchRepository,
@@ -29,13 +32,13 @@ from src.modules.watch.service import (
 )
 from src.modules.watch.ui import (
     DealDraft,
+    WatchActionCallback,
     build_delete_confirm_keyboard,
     build_list_keyboard,
     build_reply_keyboard,
     build_watch_keyboard,
     build_wizard_keyboard,
     format_wizard_step,
-    recover_draft_from_text,
 )
 
 
@@ -258,25 +261,6 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert "SỬA KÈO #7" in format_wizard_step(2, edit_draft)
     assert "Bước 1/3" in format_wizard_step(2, edit_draft)
     assert len(build_wizard_keyboard(step=2, min_step=2).inline_keyboard[0]) == 1
-
-    recovered = recover_draft_from_text(
-        "📌 LÊN KÈO NHANH\n\n🆔 UID: 100057257853932\n📝 Ghi chú: Zalo Vui\n💰 Giá: 50k\n"
-    )
-    assert (recovered.uid, recovered.note, recovered.price, recovered.edit_watch_id) == (
-        "100057257853932",
-        "Zalo Vui",
-        "50k",
-        None,
-    )
-    recovered_edit = recover_draft_from_text(
-        "✏️ SỬA KÈO #7\n\n🆔 UID: 10001\n📝 Ghi chú: Khách mới\n"
-    )
-    assert (recovered_edit.edit_watch_id, recovered_edit.uid, recovered_edit.note) == (
-        7,
-        "10001",
-        "Khách mới",
-    )
-    assert recover_draft_from_text(None) == DealDraft()
 
 
 @pytest.mark.asyncio
@@ -1049,8 +1033,6 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     m_card_fail.answer = AsyncMock()
     await _answer_watch_card(m_card_fail, live_card_item, watch_service=svc)
     m_card_fail.answer.assert_awaited_once()
-    # Stale file_id cleared after TelegramBadRequest
-    assert live_card_item.avatar_file_id == ""
 
     # Refresh expired/missing avatar_url via fetch_profile_info when opening LIVE card
     expired_item = await repo.create(
@@ -1121,5 +1103,139 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     with pytest.raises(ValueError, match="đang được xử lý"):
         await locked_svc.add_watch(55, 1, "100099")
     await add_lock.release_lock("add:55:100099")
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_watch_hardening_scan_race_all_ttl_length_caps_and_group_auth() -> None:
+    from src.modules.watch.domain import MAX_FAQ_LEN, MAX_NOTE_LEN, MAX_PRICE_LEN
+
+    # 1. Field length validation in parse_add_line & WatchService.update_watch
+    with pytest.raises(ValueError, match=str(MAX_NOTE_LEN)):
+        parse_add_line(f"10001 | {'n' * (MAX_NOTE_LEN + 1)} | 50k | 282")
+    with pytest.raises(ValueError, match=str(MAX_PRICE_LEN)):
+        parse_add_line(f"10001 | ok | {'p' * (MAX_PRICE_LEN + 1)} | 282")
+    with pytest.raises(ValueError, match=str(MAX_FAQ_LEN)):
+        parse_add_line(f"10001 | ok | 50k | {'f' * (MAX_FAQ_LEN + 1)}")
+
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    policy = WatchTtlPolicy(die_days=90, live_days=60, done_days=30, cancelled_days=14)
+    repo = RedisWatchRepository(redis, prefix="hardening", ttl_policy=policy)
+
+    # 2. ALL list keeps a DIE item that turned LIVE at day 85 visible at day 95
+    created = await repo.create(
+        chat_id=10,
+        owner_user_id=1,
+        uid="100088",
+        note="Old DIE",
+        price="50k",
+        faq="",
+        status=WatchStatus.DIE,
+    )
+    day_85 = created.created_at + timedelta(days=85)
+    created.status = WatchStatus.LIVE
+    created.live_detected_at = day_85
+    await repo.update(created, previous_status=WatchStatus.DIE)
+
+    day_95 = created.created_at + timedelta(days=95)
+    all_items, total, _ = await repo.list_chat_items(10, status_filter=None, now=day_95)
+    assert total == 1
+    assert [it.id for it in all_items] == [created.id]
+
+    # 3. scan_once() skips deleted/cancelled watches instead of resurrecting them
+    class _RaceChecker:
+        async def check(self, uid: str) -> UidCheckResult:
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def verify_live(self, uid: str) -> UidCheckResult:
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+            # Simulate user deleting the watch while HTTP check is in-flight
+            await repo.delete(race_item)
+            return "Race User", None
+
+        async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+            return None
+
+        async def resolve_uid_from_url(self, url: str) -> str | None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    race_item = await repo.create(
+        chat_id=20,
+        owner_user_id=1,
+        uid="100077",
+        note="Race",
+        price="0",
+        faq="",
+        status=WatchStatus.DIE,
+    )
+
+    class _FakeNotifier:
+        def __init__(self) -> None:
+            self.notified: list[int] = []
+
+        async def notify_live(self, item: WatchItem) -> None:
+            self.notified.append(item.id)
+
+    notifier = _FakeNotifier()
+    scanner = WatcherScanService(
+        repo=repo,
+        checker=_RaceChecker(),
+        lock=RedisLock(redis, prefix="hardening"),
+        notifier=notifier,
+    )
+    assert await scanner.scan_once() == 0
+    assert notifier.notified == []
+    assert await repo.get(race_item.id) is None
+
+    # 4. Group authorization on destructive watch callbacks
+    svc = WatchService(repo=repo, checker=_StubChecker({"100055": CheckOutcome.DIE}))
+    group_item = await svc.add_watch(-100777, 10, "100055")
+    router = create_watch_router(svc)
+    cb_handlers = {h.callback.__name__: h.callback for h in router.callback_query.handlers}
+    state = MagicMock()
+    state.clear = AsyncMock()
+
+    q_stranger = MagicMock(
+        message=MagicMock(
+            spec=Message,
+            chat=MagicMock(id=-100777, type="group"),
+            bot=AsyncMock(get_chat_member=AsyncMock(return_value=MagicMock(status="member"))),
+            text="card",
+            photo=None,
+            message_id=1,
+        ),
+        from_user=MagicMock(id=99),
+        answer=AsyncMock(),
+    )
+    await cb_handlers["cb_watch_action"](
+        q_stranger, WatchActionCallback(action="delete", watch_id=group_item.id), state
+    )
+    assert q_stranger.answer.call_args.kwargs.get("show_alert") is True
+
+    q_owner = MagicMock(
+        message=MagicMock(
+            spec=Message,
+            chat=MagicMock(id=-100777, type="group"),
+            bot=AsyncMock(),
+            text="card",
+            photo=None,
+            message_id=1,
+            edit_text=AsyncMock(),
+        ),
+        from_user=MagicMock(id=10),
+        answer=AsyncMock(),
+    )
+    await cb_handlers["cb_watch_action"](
+        q_owner, WatchActionCallback(action="cancel", watch_id=group_item.id), state
+    )
+    cancelled_item = await repo.get(group_item.id)
+    assert cancelled_item is not None
+    assert cancelled_item.status == WatchStatus.CANCELLED
 
     await redis.aclose()

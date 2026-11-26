@@ -41,14 +41,18 @@ class BulkCheckService:
         self._max_bulk_uids = max_bulk_uids
         self._progress_interval = max(0.5, progress_interval_seconds)
         self._tasks: set[asyncio.Task[Any]] = set()
-        self._jobs: dict[str, tuple[int, asyncio.Task[Any]]] = {}
+        self._jobs: dict[str, tuple[int, int, asyncio.Task[Any]]] = {}
 
     @property
     def max_bulk_uids(self) -> int:
         return self._max_bulk_uids
 
     def is_chat_busy(self, chat_id: int) -> bool:
-        return any(cid == chat_id for cid, _ in self._jobs.values())
+        return any(cid == chat_id for cid, _, _ in self._jobs.values())
+
+    def get_job_owner(self, job_id: str) -> int | None:
+        entry = self._jobs.get(job_id)
+        return entry[1] if entry is not None else None
 
     def cancel_bulk_job(self, chat_id: int, job_id: str | None = None) -> bool:
         if job_id is not None:
@@ -56,14 +60,14 @@ class BulkCheckService:
             if entry is None or entry[0] != chat_id:
                 return False
             self._jobs.pop(job_id, None)
-            entry[1].cancel()
+            entry[2].cancel()
             logger.info("bulk_job_cancel_requested job_id=%s chat_id=%s", job_id, chat_id)
             return True
-        targets = [jid for jid, (cid, _) in self._jobs.items() if cid == chat_id]
+        targets = [jid for jid, (cid, _, _) in self._jobs.items() if cid == chat_id]
         if not targets:
             return False
         for jid in targets:
-            _, task = self._jobs.pop(jid)
+            _, _, task = self._jobs.pop(jid)
             task.cancel()
             logger.info("bulk_job_cancel_requested job_id=%s chat_id=%s", jid, chat_id)
         return True
@@ -116,11 +120,11 @@ class BulkCheckService:
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         return await self._checker.fetch_avatar_bytes(url)
 
-    def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int]:
-        uids, skipped = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
+    def prepare_bulk_text(self, text: str) -> tuple[str, list[str], int, int]:
+        uids, skipped, truncated = extract_uids_from_text(text, max_uids=self._max_bulk_uids)
         if not uids:
             raise ValueError("Không tìm thấy UID hợp lệ nào trong nội dung gửi lên.")
-        return uuid.uuid4().hex[:8], uids, skipped
+        return uuid.uuid4().hex[:8], uids, skipped, truncated
 
     def start_bulk_uids(
         self,
@@ -130,6 +134,8 @@ class BulkCheckService:
         status_message_id: int,
         uids: Sequence[str],
         notifier: BulkNotifierPort,
+        owner_user_id: int = 0,
+        truncated: int = 0,
     ) -> None:
         def _release_job() -> None:
             self._jobs.pop(job_id, None)
@@ -142,6 +148,7 @@ class BulkCheckService:
                     status_message_id=status_message_id,
                     uids=uids,
                     notifier=notifier,
+                    truncated=truncated,
                 )
             except asyncio.CancelledError:
                 logger.info("bulk_job_cancelled job_id=%s chat_id=%s", job_id, chat_id)
@@ -158,7 +165,7 @@ class BulkCheckService:
                 _release_job()
 
         task = asyncio.create_task(_runner(), name=f"bulk:{job_id}")
-        self._jobs[job_id] = (chat_id, task)
+        self._jobs[job_id] = (chat_id, owner_user_id, task)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         task.add_done_callback(lambda _t: _release_job())
@@ -171,14 +178,17 @@ class BulkCheckService:
         text: str,
         status_message_id: int,
         notifier: BulkNotifierPort,
+        owner_user_id: int = 0,
     ) -> tuple[str, int, int]:
-        job_id, uids, skipped = self.prepare_bulk_text(text)
+        job_id, uids, skipped, truncated = self.prepare_bulk_text(text)
         self.start_bulk_uids(
             job_id=job_id,
             chat_id=chat_id,
             status_message_id=status_message_id,
             uids=uids,
             notifier=notifier,
+            owner_user_id=owner_user_id,
+            truncated=truncated,
         )
         return job_id, len(uids), skipped
 
@@ -190,6 +200,7 @@ class BulkCheckService:
         status_message_id: int,
         uids: Sequence[str],
         notifier: BulkNotifierPort,
+        truncated: int = 0,
     ) -> BulkSummary:
         started = time.monotonic()
         total = len(uids)
@@ -251,8 +262,7 @@ class BulkCheckService:
                     w.cancel()
             if not reporter_task.done():
                 reporter_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reporter_task
+            await asyncio.gather(*workers, reporter_task, return_exceptions=True)
             raise
         else:
             workers_done.set()
@@ -266,6 +276,7 @@ class BulkCheckService:
             die=len(die_uids),
             error=len(error_uids),
             elapsed_seconds=elapsed,
+            truncated=truncated,
         )
 
         caption = format_bulk_summary(summary)

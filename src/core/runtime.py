@@ -10,7 +10,8 @@ from typing import Any
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.base import DefaultKeyBuilder
+from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.types import BotCommand
 
 from src.core.checker import CurlCffiFacebookChecker
@@ -49,7 +50,7 @@ async def run_watcher_loop(
     while not stop_event.is_set():
         started = time.monotonic()
         try:
-            await scanner.scan_once()
+            await asyncio.wait_for(scanner.scan_once(), timeout=max(60.0, delay * 4))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -120,7 +121,14 @@ async def run_bot(settings: Settings) -> None:
         notify_lock_ttl_seconds=settings.notify_lock_ttl_seconds,
     )
 
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(
+        storage=RedisStorage(
+            redis=redis,
+            key_builder=DefaultKeyBuilder(prefix=f"{settings.redis_key_prefix}:fsm"),
+            state_ttl=3600,
+            data_ttl=3600,
+        )
+    )
     throttle = ThrottlingMiddleware(limit_per_minute=settings.user_rate_limit_per_minute)
     dp.message.middleware(throttle)
     dp.callback_query.middleware(throttle)

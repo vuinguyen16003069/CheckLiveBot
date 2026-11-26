@@ -50,6 +50,32 @@ class ParsedWatchInput(BaseModel):
     faq: str = ""
 
 
+MAX_NOTE_LEN = 400
+MAX_PRICE_LEN = 64
+MAX_FAQ_LEN = 128
+
+
+def normalize_watch_fields(
+    note: str,
+    price: str,
+    faq: str,
+    *,
+    default_note: str = "Không có ghi chú",
+) -> tuple[str, str, str]:
+    cleaned_note = note.strip() or default_note
+    cleaned_price = price.strip() or "0"
+    cleaned_faq = faq.strip()
+    if cleaned_faq == "-":
+        cleaned_faq = ""
+    if len(cleaned_note) > MAX_NOTE_LEN:
+        raise ValueError(f"Ghi chú tối đa {MAX_NOTE_LEN} ký tự.")
+    if len(cleaned_price) > MAX_PRICE_LEN:
+        raise ValueError(f"Giá tối đa {MAX_PRICE_LEN} ký tự.")
+    if len(cleaned_faq) > MAX_FAQ_LEN:
+        raise ValueError(f"FAQ tối đa {MAX_FAQ_LEN} ký tự.")
+    return cleaned_note, cleaned_price, cleaned_faq
+
+
 def parse_add_line(raw: str) -> ParsedWatchInput:
     """Single canonical format: UID | Ghi chú | Giá | FAQ (only UID is required)."""
     text = raw.strip()
@@ -64,9 +90,10 @@ def parse_add_line(raw: str) -> ParsedWatchInput:
     if not uid:
         raise ValueError("UID không hợp lệ (cần 1–20 chữ số hoặc link Facebook cá nhân).")
 
-    note = parts[1] if len(parts) >= 2 and parts[1] else "Không có ghi chú"
-    price = parts[2] if len(parts) >= 3 and parts[2] else "0"
-    faq = parts[3] if len(parts) >= 4 else ""
+    raw_note = parts[1] if len(parts) >= 2 else ""
+    raw_price = parts[2] if len(parts) >= 3 else ""
+    raw_faq = parts[3] if len(parts) >= 4 else ""
+    note, price, faq = normalize_watch_fields(raw_note, raw_price, raw_faq)
     return ParsedWatchInput(uid=uid, note=note, price=price, faq=faq)
 
 

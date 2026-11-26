@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram import Bot
+from aiogram.types import Message
 
 from src.core.ports import CheckOutcome, UidCheckResult
 from src.modules.bulk.domain import (
@@ -18,7 +19,12 @@ from src.modules.bulk.domain import (
     format_single_check,
     render_progress_bar,
 )
-from src.modules.bulk.handlers import TelegramBulkNotifier, build_single_check_markup
+from src.modules.bulk.handlers import (
+    CancelBulkCallback,
+    TelegramBulkNotifier,
+    build_single_check_markup,
+    create_bulk_router,
+)
 from src.modules.bulk.service import BulkCheckService
 
 
@@ -113,15 +119,17 @@ def test_extract_uid_edge_cases(raw: str, expected: str | None) -> None:
 def test_extract_uids_deduplicates_caps_and_formats() -> None:
     lines = [str(1000000000 + i) for i in range(10000)]
     lines.extend(["1000000000", "invalid_row", "https://fb.com/profile.php?id=1000000001"])
-    uids, skipped = extract_uids_from_text("\n".join(lines))
+    uids, skipped, truncated = extract_uids_from_text("\n".join(lines))
     assert len(uids) == 10000
     assert skipped == 3
+    assert truncated == 0
 
     # Embedded numeric token extraction ignores leading-zero tokens + respects max_uids cap
     mixed = "\n\n00000\n012345\nuser 100011111111111 note\n100022222222222\n100033333333333\n"
-    capped, cap_skipped = extract_uids_from_text(mixed, max_uids=2)
+    capped, cap_skipped, cap_truncated = extract_uids_from_text(mixed, max_uids=2)
     assert capped == ["100011111111111", "100022222222222"]
     assert cap_skipped == 2
+    assert cap_truncated == 1
 
     # Progress bar boundary clamping
     assert render_progress_bar(0, 0, width=4) == "[░░░░] 0%"
@@ -378,7 +386,8 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
 
     def _make_msg(text: str = "", chat_id: int = 100) -> MagicMock:
         m = MagicMock(spec=Message)
-        m.chat = MagicMock(id=chat_id)
+        m.chat = MagicMock(id=chat_id, type="private")
+        m.from_user = MagicMock(id=1)
         m.text = text
         m.photo = None
         m.bot = AsyncMock(spec=Bot)
@@ -424,13 +433,14 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
     )
     assert "❌" in m_bad.answer.call_args.args[0]
 
-    # 4. cb_recheck_single edits caption on photo message and text on plain message
+    # 4. cb_recheck_single updates media on photo message when LIVE and edits text on plain message
     q_photo = MagicMock()
     q_photo.message = _make_msg()
     q_photo.message.photo = [MagicMock()]
+    q_photo.message.edit_media = AsyncMock()
     q_photo.answer = AsyncMock()
     await cb_handlers["cb_recheck_single"](q_photo, RecheckSingleCallback(uid="4"))
-    q_photo.message.edit_caption.assert_awaited_once()
+    q_photo.message.edit_media.assert_awaited_once()
     q_photo.answer.assert_awaited_once()
 
     q_text = MagicMock()
@@ -465,6 +475,7 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
     ).job_id
     q_cancel = MagicMock()
     q_cancel.message = _make_msg(chat_id=200)
+    q_cancel.from_user = MagicMock(id=1)
     q_cancel.answer = AsyncMock()
     await cb_handlers["cb_cancel_bulk"](q_cancel, CancelBulkCallback(job_id=active_job_id))
     assert svc.is_chat_busy(200) is False
@@ -472,6 +483,7 @@ async def test_bulk_router_handlers_check_recheck_cancel_txt_and_smart_text() ->
 
     q_cancel_again = MagicMock()
     q_cancel_again.message = _make_msg(chat_id=200)
+    q_cancel_again.from_user = MagicMock(id=1)
     q_cancel_again.answer = AsyncMock()
     await cb_handlers["cb_cancel_bulk"](q_cancel_again, CancelBulkCallback(job_id=active_job_id))
     q_cancel_again.message.edit_reply_markup.assert_awaited_once_with(reply_markup=None)
@@ -571,7 +583,8 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
 
     def _make_msg(text: str = "", chat_id: int = 400) -> MagicMock:
         m = MagicMock(spec=Message)
-        m.chat = MagicMock(id=chat_id)
+        m.chat = MagicMock(id=chat_id, type="private")
+        m.from_user = MagicMock(id=1)
         m.text = text
         m.photo = None
         m.document = None
@@ -684,4 +697,102 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
     q_to_die.message.answer.assert_awaited_once()
     q_to_die.message.delete.assert_awaited_once()
 
+    await svc.close()
+
+
+@pytest.mark.asyncio
+async def test_bulk_hardening_busy_guard_truncation_and_group_auth() -> None:
+    from src.modules.bulk.domain import BulkSummary, format_bulk_summary
+
+    summary_text = format_bulk_summary(
+        BulkSummary(
+            job_id="abc",
+            total=2,
+            live=1,
+            die=1,
+            error=0,
+            elapsed_seconds=1.2,
+            truncated=5,
+        )
+    )
+    assert "Đã cắt bớt" in summary_text
+    assert "5" in summary_text
+
+    gate = asyncio.Event()
+
+    class _SlowChecker:
+        async def check(self, uid: str) -> UidCheckResult:
+            await gate.wait()
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def verify_live(self, uid: str) -> UidCheckResult:
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+            return None, None
+
+        async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+            return None
+
+        async def resolve_uid_from_url(self, url: str) -> str | None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    svc = BulkCheckService(checker=_SlowChecker(), concurrency=2, progress_interval_seconds=10.0)
+    router = create_bulk_router(svc)
+    msg_handlers = {h.callback.__name__: h.callback for h in router.message.handlers}
+    cb_handlers = {h.callback.__name__: h.callback for h in router.callback_query.handlers}
+
+    state = MagicMock()
+    state.get_state = AsyncMock(return_value=None)
+    state.clear = AsyncMock()
+
+    m_group = MagicMock(spec=Message)
+    m_group.chat = MagicMock(id=-100999, type="group")
+    m_group.from_user = MagicMock(id=10)
+    m_group.text = "4\n5"
+    m_group.bot = AsyncMock(spec=Bot)
+    m_group.answer = AsyncMock(return_value=MagicMock(message_id=50))
+    await msg_handlers["handle_smart_plain_text"](m_group, state)
+    assert svc.is_chat_busy(-100999) is True
+
+    # Second bulk request in same busy chat is rejected
+    m_busy = MagicMock(spec=Message)
+    m_busy.chat = MagicMock(id=-100999, type="group")
+    m_busy.from_user = MagicMock(id=10)
+    m_busy.text = "6\n7"
+    m_busy.bot = AsyncMock(spec=Bot)
+    m_busy.answer = AsyncMock()
+    await msg_handlers["handle_smart_plain_text"](m_busy, state)
+    assert "đang có phiên kiểm tra hàng loạt" in m_busy.answer.call_args.args[0]
+
+    active_job_id = next(iter(svc._jobs))  # type: ignore[reportPrivateUsage]
+
+    # Non-owner non-admin in group cannot cancel
+    q_stranger = MagicMock()
+    q_stranger.from_user = MagicMock(id=99)
+    q_stranger.message = MagicMock(spec=Message)
+    q_stranger.message.chat = MagicMock(id=-100999, type="group")
+    q_stranger.message.bot = AsyncMock(spec=Bot)
+    q_stranger.message.bot.get_chat_member = AsyncMock(return_value=MagicMock(status="member"))
+    q_stranger.answer = AsyncMock()
+    await cb_handlers["cb_cancel_bulk"](q_stranger, CancelBulkCallback(job_id=active_job_id))
+    assert q_stranger.answer.call_args.kwargs.get("show_alert") is True
+    assert svc.is_chat_busy(-100999) is True
+
+    # Group admin can cancel
+    q_admin = MagicMock()
+    q_admin.from_user = MagicMock(id=88)
+    q_admin.message = MagicMock(spec=Message)
+    q_admin.message.chat = MagicMock(id=-100999, type="group")
+    q_admin.message.bot = AsyncMock(spec=Bot)
+    q_admin.message.bot.get_chat_member = AsyncMock(return_value=MagicMock(status="administrator"))
+    q_admin.message.edit_text = AsyncMock()
+    q_admin.answer = AsyncMock()
+    await cb_handlers["cb_cancel_bulk"](q_admin, CancelBulkCallback(job_id=active_job_id))
+    assert svc.is_chat_busy(-100999) is False
+
+    gate.set()
     await svc.close()

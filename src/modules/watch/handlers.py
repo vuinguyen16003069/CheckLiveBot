@@ -19,8 +19,12 @@ from aiogram.types import (
 )
 
 from src.core.ports import FacebookCheckerPort
+from src.core.telegram import is_actor_authorized
 from src.modules.bulk.domain import extract_uid
 from src.modules.watch.domain import (
+    MAX_FAQ_LEN,
+    MAX_NOTE_LEN,
+    MAX_PRICE_LEN,
     WatchItem,
     WatchStatus,
     format_live_notification,
@@ -44,7 +48,6 @@ from src.modules.watch.ui import (
     build_watch_keyboard,
     build_wizard_keyboard,
     format_wizard_step,
-    recover_draft_from_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,24 +57,19 @@ async def _resolve_watch_photo(
     item: WatchItem,
     fetch_bytes: Callable[[str], Awaitable[bytes | None]] | None,
     refresh_profile: Callable[[str], Awaitable[tuple[str | None, str | None]]] | None = None,
-) -> str | BufferedInputFile | None:
-    if item.avatar_file_id:
-        return item.avatar_file_id
+) -> BufferedInputFile | None:
     if fetch_bytes is None:
         return None
-    if item.avatar_url:
-        avatar_bytes = await fetch_bytes(item.avatar_url)
-        if avatar_bytes:
-            return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
     if refresh_profile is not None and item.status != WatchStatus.DIE:
         fresh_name, fresh_avatar = await refresh_profile(item.uid)
         if fresh_name:
             item.fb_name = fresh_name
-        if fresh_avatar and fresh_avatar != item.avatar_url:
+        if fresh_avatar:
             item.avatar_url = fresh_avatar
-            avatar_bytes = await fetch_bytes(fresh_avatar)
-            if avatar_bytes:
-                return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
+    if item.avatar_url:
+        avatar_bytes = await fetch_bytes(item.avatar_url)
+        if avatar_bytes:
+            return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
     return None
 
 
@@ -82,8 +80,7 @@ class TelegramWatchNotifier:
 
     async def notify_live(self, item: WatchItem) -> None:
         fetch_bytes = self._checker.fetch_avatar_bytes if self._checker is not None else None
-        refresh_profile = self._checker.fetch_profile_info if self._checker is not None else None
-        photo = await _resolve_watch_photo(item, fetch_bytes, refresh_profile)
+        photo = await _resolve_watch_photo(item, fetch_bytes)
         text = format_live_notification(item)
         markup = build_watch_keyboard(item)
 
@@ -101,8 +98,6 @@ class TelegramWatchNotifier:
                         item.avatar_file_id = sent.photo[-1].file_id
                     return
                 except TelegramBadRequest as exc:
-                    if isinstance(photo, str):
-                        item.avatar_file_id = ""
                     logger.warning(
                         "watcher_notify_photo_failed watch_id=%s uid=%s error=%s",
                         item.id,
@@ -281,21 +276,41 @@ def create_watch_router(watch_service: WatchService) -> Router:
 
     @router.message(WizardStates.waiting_note, F.text)
     async def wizard_step_note(message: Message, state: FSMContext, bot: Bot) -> None:
+        note = (message.text or "").strip() or "Theo dõi nhanh"
+        if len(note) > MAX_NOTE_LEN:
+            await message.answer(
+                f"⚠️ Ghi chú tối đa {MAX_NOTE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn."
+            )
+            return
+        note = (message.text or "").strip() or "Theo dõi nhanh"
+        if len(note) > MAX_NOTE_LEN:
+            await message.answer(
+                f"⚠️ Ghi chú tối đa {MAX_NOTE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn."
+            )
+            return
         draft = await _load_draft(state)
-        draft.note = (message.text or "").strip() or "Theo dõi nhanh"
+        draft.note = note
         await _advance_wizard(message, state, bot, draft, next_step=3)
 
     @router.message(WizardStates.waiting_price, F.text)
     async def wizard_step_price(message: Message, state: FSMContext, bot: Bot) -> None:
+        price = (message.text or "").strip() or "0"
+        if len(price) > MAX_PRICE_LEN:
+            await message.answer(f"⚠️ Giá tối đa {MAX_PRICE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn.")
+            return
         draft = await _load_draft(state)
-        draft.price = (message.text or "").strip() or "0"
+        draft.price = price
         await _advance_wizard(message, state, bot, draft, next_step=4)
 
     @router.message(WizardStates.waiting_faq, F.text)
     async def wizard_step_faq(message: Message, state: FSMContext, bot: Bot) -> None:
-        draft = await _load_draft(state)
         faq = (message.text or "").strip()
-        draft.faq = "" if faq == "-" else faq
+        cleaned_faq = "" if faq == "-" else faq
+        if len(cleaned_faq) > MAX_FAQ_LEN:
+            await message.answer(f"⚠️ FAQ tối đa {MAX_FAQ_LEN} ký tự. Vui lòng nhập ngắn gọn hơn.")
+            return
+        draft = await _load_draft(state)
+        draft.faq = cleaned_faq
         await _finalize_wizard(message, state, watch_service, draft, _user_id(message), bot=bot)
 
     @router.callback_query(WizardCallback.filter())
@@ -309,10 +324,6 @@ def create_watch_router(watch_service: WatchService) -> Router:
             return
 
         draft = await _load_draft(state)
-        if not draft.uid:
-            recovered = recover_draft_from_text(msg.text)
-            if recovered.uid:
-                draft = recovered
         draft.wizard_message_id = msg.message_id
         action = callback_data.action
 
@@ -440,10 +451,22 @@ def create_watch_router(watch_service: WatchService) -> Router:
         action = callback_data.action
         watch_id = callback_data.watch_id
         chat_id = msg.chat.id
-        if action != "edit":
-            await state.clear()
 
         try:
+            if action in ("edit", "delete", "delete_confirm", "cancel"):
+                target = await watch_service.get_watch(chat_id, watch_id)
+                if not await is_actor_authorized(
+                    msg.bot, msg.chat, query.from_user.id, target.owner_user_id
+                ):
+                    await query.answer(
+                        "Chỉ chủ kèo hoặc Admin group mới được thực hiện thao tác này.",
+                        show_alert=True,
+                    )
+                    return
+
+            if action != "edit":
+                await state.clear()
+
             if action == "edit":
                 item = await watch_service.get_watch(chat_id, watch_id)
                 await _start_wizard(
@@ -712,9 +735,6 @@ async def _answer_watch_card(
                     item.uid,
                     exc,
                 )
-                if isinstance(photo, str) and watch_service is not None:
-                    with contextlib.suppress(Exception):
-                        await watch_service.save_profile_snapshot(item, avatar_file_id="")
     else:
         text = format_watch_card(item, title=title)
     await message.answer(text, reply_markup=reply_markup)

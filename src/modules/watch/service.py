@@ -16,6 +16,7 @@ from src.modules.watch.domain import (
     WatchItem,
     WatchStats,
     WatchStatus,
+    normalize_watch_fields,
     parse_add_line,
 )
 
@@ -88,6 +89,11 @@ class WatchTtlPolicy:
         anchor = self.anchor_time(item)
         days = self.days_for_status(item.status)
         return max(1, int((anchor + timedelta(days=days) - ref_now).total_seconds()))
+
+    def expiry_ts(self, item: WatchItem) -> float:
+        anchor = self.anchor_time(item)
+        days = self.days_for_status(item.status)
+        return (anchor + timedelta(days=days)).timestamp()
 
     def cutoff_ts(
         self,
@@ -162,7 +168,7 @@ class RedisWatchRepository:
             live_detected_at=now if status == WatchStatus.LIVE else None,
             completed_at=now if status in (WatchStatus.DONE, WatchStatus.CANCELLED) else None,
         )
-        created_score = now.timestamp()
+        expiry_score = self._policy.expiry_ts(item)
         status_score = self._policy.anchor_time(item).timestamp()
         item_ttl = self._policy.seconds_for_status(status)
         container_ttl = self._policy.max_watch_ttl_seconds
@@ -174,7 +180,7 @@ class RedisWatchRepository:
             if self._policy.seq_ttl_seconds > 0:
                 pipe.expire(seq_key, self._policy.seq_ttl_seconds)
             pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=item_ttl)
-            pipe.zadd(chat_key, {str(watch_id): created_score})
+            pipe.zadd(chat_key, {str(watch_id): expiry_score})
             pipe.expire(chat_key, container_ttl)
             pipe.zadd(status_key, {str(watch_id): status_score})
             pipe.expire(status_key, item_ttl)
@@ -239,6 +245,7 @@ class RedisWatchRepository:
             pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=item_ttl)
             pipe.hset(uid_key, item.uid, str(item.id))
             pipe.expire(uid_key, container_ttl)
+            pipe.zadd(chat_key, {str(item.id): self._policy.expiry_ts(item)})
             pipe.expire(chat_key, container_ttl)
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
@@ -312,7 +319,11 @@ class RedisWatchRepository:
             if status_filter
             else self._k(f"watches:chat:{chat_id}")
         )
-        cutoff = self._policy.cutoff_ts(status_filter, now)
+        cutoff = (
+            self._policy.cutoff_ts(status_filter, now)
+            if status_filter is not None
+            else _ensure_utc(now or datetime.now(UTC)).timestamp()
+        )
         if page <= 1:
             async with self._redis.pipeline(transaction=False) as pipe:
                 pipe.zremrangebyscore(key, "-inf", cutoff)
@@ -618,10 +629,9 @@ class WatchService:
         faq: str,
     ) -> WatchItem:
         item = await self._require_owned(chat_id, watch_id)
-        item.note = note.strip() or "Theo dõi nhanh"
-        item.price = price.strip() or "0"
-        cleaned_faq = faq.strip()
-        item.faq = "" if cleaned_faq == "-" else cleaned_faq
+        item.note, item.price, item.faq = normalize_watch_fields(
+            note, price, faq, default_note="Theo dõi nhanh"
+        )
         is_hidden = item.is_hidden
         updated = await self._repo.update(item)
         updated.is_hidden = is_hidden
@@ -712,26 +722,30 @@ class WatcherScanService:
                     )
                     if not locked:
                         continue
-                    item.last_checked_at = now
-                    item.status = WatchStatus.LIVE
-                    item.live_detected_at = now
+                    latest = await self._repo.get(item.id)
+                    if latest is None or latest.status != WatchStatus.DIE:
+                        await self._lock.release_lock(lock_key)
+                        continue
+                    latest.last_checked_at = now
+                    latest.status = WatchStatus.LIVE
+                    latest.live_detected_at = now
                     if fb_name:
-                        item.fb_name = fb_name
+                        latest.fb_name = fb_name
                     if avatar_url:
-                        item.avatar_url = avatar_url
-                    item.is_hidden = await _get_hidden(item.chat_id)
+                        latest.avatar_url = avatar_url
+                    latest.is_hidden = await _get_hidden(latest.chat_id)
                     try:
-                        await self._notifier.notify_live(item)
+                        await self._notifier.notify_live(latest)
                     except Exception as exc:
                         logger.warning(
                             "watcher_notify_failed watch_id=%s chat_id=%s error=%s",
-                            item.id,
-                            item.chat_id,
+                            latest.id,
+                            latest.chat_id,
                             exc,
                         )
                         await self._lock.release_lock(lock_key)
                         continue
-                    await self._repo.update(item, previous_status=WatchStatus.DIE)
+                    await self._repo.update(latest, previous_status=WatchStatus.DIE)
                     count += 1
                 return count
             except Exception as exc:

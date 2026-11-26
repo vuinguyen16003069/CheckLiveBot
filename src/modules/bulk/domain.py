@@ -16,6 +16,7 @@ class BulkSummary(BaseModel):
     die: int
     error: int
     elapsed_seconds: float
+    truncated: int = 0
 
 
 _PROFILE_ID_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", re.IGNORECASE)
@@ -83,14 +84,18 @@ def extract_uid(raw: str) -> str | None:
     return None
 
 
-def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str], int]:
-    """Extract deduplicated UIDs preserving order. Returns (uids, duplicate_or_skipped_count)."""
+def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str], int, int]:
+    """Extract deduplicated UIDs preserving order. Returns (uids, skipped, truncated_lines)."""
     seen: set[str] = set()
     uids: list[str] = []
     skipped = 0
+    truncated = 0
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped:
+            continue
+        if len(uids) >= max_uids:
+            truncated += 1
             continue
         uid = extract_uid(stripped)
         if uid is None:
@@ -104,9 +109,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         seen.add(uid)
         uids.append(uid)
-        if len(uids) >= max_uids:
-            break
-    return uids, skipped
+    return uids, skipped, truncated
 
 
 def render_progress_bar(done: int, total: int, width: int = 12) -> str:
@@ -144,6 +147,11 @@ def format_bulk_progress(
 
 
 def format_bulk_summary(summary: BulkSummary) -> str:
+    truncated_line = (
+        f"\n• ⚠️ Đã cắt bớt: <b>{summary.truncated:,}</b> dòng vượt giới hạn"
+        if summary.truncated > 0
+        else ""
+    )
     return (
         f"🏁 <b>Hoàn tất kiểm tra hàng loạt</b> (<code>#{html.escape(summary.job_id)}</code>)\n\n"
         f"• Tổng UID: <b>{summary.total:,}</b>\n"
@@ -151,6 +159,7 @@ def format_bulk_summary(summary: BulkSummary) -> str:
         f"• ❌ DIE: <b>{summary.die:,}</b>\n"
         f"• ⚠️ ERROR: <b>{summary.error:,}</b>\n"
         f"• ⏱ Thời gian: <b>{summary.elapsed_seconds:.1f}s</b>"
+        f"{truncated_line}"
     )
 
 

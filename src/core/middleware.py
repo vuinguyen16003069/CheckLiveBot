@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -8,6 +9,32 @@ from typing import Any
 
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
+
+_GROUP_SHORTCUTS = frozenset({"➕ Lên kèo", "📋 Danh sách", "🔎 Check nhanh", "📊 Thống kê"})
+_GROUP_FB_HINT_RE = re.compile(r"(?:facebook|fb)\.com/|^\d{1,20}$", re.IGNORECASE)
+
+
+def _is_group_bot_interaction(message: Message) -> bool:
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(chat, "type", None)
+    if chat_type not in ("group", "supergroup"):
+        return True
+    doc = getattr(message, "document", None)
+    if doc is not None and (getattr(doc, "file_name", "") or "").lower().endswith(".txt"):
+        return True
+    reply_to = getattr(message, "reply_to_message", None)
+    reply_user = getattr(reply_to, "from_user", None)
+    if reply_user is not None and getattr(reply_user, "is_bot", False):
+        return True
+    text = (getattr(message, "text", None) or "").strip()
+    if not text:
+        return False
+    return (
+        text.startswith("/")
+        or text in _GROUP_SHORTCUTS
+        or "\n" in text
+        or bool(_GROUP_FB_HINT_RE.search(text))
+    )
 
 
 class ThrottlingMiddleware(BaseMiddleware):
@@ -54,7 +81,12 @@ class ThrottlingMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user_id: int | None = None
-        if isinstance(event, (Message, CallbackQuery)) and event.from_user:
+        if isinstance(event, Message):
+            if not _is_group_bot_interaction(event):
+                return await handler(event, data)
+            if event.from_user:
+                user_id = event.from_user.id
+        elif isinstance(event, CallbackQuery) and event.from_user:
             user_id = event.from_user.id
 
         if user_id is not None and not self.check_rate_limit(user_id):

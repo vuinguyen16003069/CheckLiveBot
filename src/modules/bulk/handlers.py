@@ -18,10 +18,12 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     Message,
 )
 
 from src.core.ports import CheckOutcome
+from src.core.telegram import is_actor_authorized
 from src.modules.bulk.domain import (
     build_combined_result_file,
     extract_fb_url,
@@ -175,8 +177,21 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         markup = build_single_check_markup(uid, outcome)
         if msg.photo:
             if outcome == CheckOutcome.LIVE:
-                with contextlib.suppress(TelegramBadRequest):
-                    await msg.edit_caption(caption=text, reply_markup=markup)
+                avatar_bytes = (
+                    await bulk_service.fetch_avatar_bytes(avatar_url) if avatar_url else None
+                )
+                if avatar_bytes:
+                    with contextlib.suppress(TelegramBadRequest):
+                        await msg.edit_media(
+                            media=InputMediaPhoto(
+                                media=BufferedInputFile(avatar_bytes, filename=f"{uid}.jpg"),
+                                caption=text,
+                            ),
+                            reply_markup=markup,
+                        )
+                else:
+                    with contextlib.suppress(TelegramBadRequest):
+                        await msg.edit_caption(caption=text, reply_markup=markup)
             else:
                 await msg.answer(text, reply_markup=markup)
                 with contextlib.suppress(TelegramBadRequest):
@@ -201,6 +216,12 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         msg = query.message
         if not isinstance(msg, Message):
             await query.answer()
+            return
+        owner_id = bulk_service.get_job_owner(callback_data.job_id)
+        if owner_id is not None and not await is_actor_authorized(
+            msg.bot, msg.chat, query.from_user.id, owner_id
+        ):
+            await query.answer("Chỉ người tạo phiên hoặc Admin mới được dừng.", show_alert=True)
             return
         cancelled = bulk_service.cancel_bulk_job(msg.chat.id, callback_data.job_id)
         if cancelled:
@@ -227,6 +248,12 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             await message.answer("❌ File quá lớn (tối đa 10 MB).")
             return
 
+        if bulk_service.is_chat_busy(message.chat.id):
+            await message.answer(
+                "⏳ Chat này đang có phiên kiểm tra hàng loạt đang chạy. "
+                "Vui lòng chờ hoàn tất hoặc bấm <b>🛑 Dừng check</b>."
+            )
+            return
         if await state.get_state() is not None:
             await state.clear()
 
@@ -235,19 +262,19 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         raw_bytes = buf.getvalue()
         try:
             if len(raw_bytes) > 65536:
-                job_id, uids, _ = await asyncio.to_thread(
+                job_id, uids, _, truncated = await asyncio.to_thread(
                     lambda: bulk_service.prepare_bulk_text(
                         raw_bytes.decode("utf-8", errors="ignore")
                     )
                 )
             else:
-                job_id, uids, _ = bulk_service.prepare_bulk_text(
+                job_id, uids, _, truncated = bulk_service.prepare_bulk_text(
                     raw_bytes.decode("utf-8", errors="ignore")
                 )
         except ValueError as exc:
             await message.answer(f"❌ {exc}")
             return
-        await _start_bulk_prepared(message, bulk_service, job_id, uids)
+        await _start_bulk_prepared(message, bulk_service, job_id, uids, truncated=truncated)
 
     @router.message(
         StateFilter(None, ListLookupStates.waiting_uid),
@@ -268,15 +295,21 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
             return
         if "\n" in text:
             try:
-                job_id, uids, _ = bulk_service.prepare_bulk_text(text)
+                job_id, uids, _, truncated = bulk_service.prepare_bulk_text(text)
             except ValueError:
                 return
             if len(uids) == 1:
                 await _reply_single_check(message, bulk_service, uids[0])
             elif len(uids) >= 2:
+                if bulk_service.is_chat_busy(message.chat.id):
+                    await message.answer(
+                        "⏳ Chat này đang có phiên kiểm tra hàng loạt đang chạy. "
+                        "Vui lòng chờ hoàn tất hoặc bấm <b>🛑 Dừng check</b>."
+                    )
+                    return
                 if await state.get_state() is not None:
                     await state.clear()
-                await _start_bulk_prepared(message, bulk_service, job_id, uids)
+                await _start_bulk_prepared(message, bulk_service, job_id, uids, truncated=truncated)
 
     return router
 
@@ -334,6 +367,8 @@ async def _start_bulk_prepared(
     bulk_service: BulkCheckService,
     job_id: str,
     uids: Sequence[str],
+    *,
+    truncated: int = 0,
 ) -> None:
     if message.bot is None:
         return
@@ -355,4 +390,6 @@ async def _start_bulk_prepared(
         status_message_id=status_msg.message_id,
         uids=uids,
         notifier=TelegramBulkNotifier(message.bot, job_id=job_id),
+        owner_user_id=message.from_user.id if message.from_user else 0,
+        truncated=truncated,
     )

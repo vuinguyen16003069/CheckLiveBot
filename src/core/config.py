@@ -60,7 +60,9 @@ class Settings(BaseModel):
         alias="PROGRESS_UPDATE_INTERVAL_SECONDS",
     )
 
-    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        default="INFO", alias="LOG_LEVEL"
+    )
     log_format: Literal["console", "json"] = Field(default="console", alias="LOG_FORMAT")
 
     def __init__(self, **overrides: Any) -> None:

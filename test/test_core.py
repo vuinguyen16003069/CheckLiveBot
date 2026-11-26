@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import fakeredis.aioredis
 import pytest
@@ -395,7 +395,7 @@ def test_parse_public_profile_html_extracts_name_and_avatar() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
+async def test_fetch_profile_info_uses_singleflight_and_always_fetches_latest() -> None:
     class _ProfileSession:
         def __init__(self) -> None:
             self.calls = 0
@@ -403,10 +403,11 @@ async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
         async def get(self, url: str, **kwargs: Any) -> Any:
             self.calls += 1
             await asyncio.sleep(0.03)
+            name = "Mark Zuckerberg" if self.calls == 1 else "Mark Updated"
             return SimpleNamespace(
                 text=(
-                    '<html><head><meta property="og:title" content="Mark Zuckerberg" />'
-                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/a.jpg" />'
+                    f'<html><head><meta property="og:title" content="{name}" />'
+                    f'<meta property="og:image" content="https://scontent.xx.fbcdn.net/a{self.calls}.jpg" />'
                     "</head></html>"
                 )
             )
@@ -416,14 +417,14 @@ async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
 
     sess = _ProfileSession()
     checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
-    # 4 concurrent calls coalesce into 1 HTTP request
+    # 4 concurrent calls coalesce into 1 HTTP request via singleflight
     batch = await asyncio.gather(*(checker.fetch_profile_info("4") for _ in range(4)))
-    assert all(r == ("Mark Zuckerberg", "https://scontent.xx.fbcdn.net/a.jpg") for r in batch)
+    assert all(r == ("Mark Zuckerberg", "https://scontent.xx.fbcdn.net/a1.jpg") for r in batch)
     assert sess.calls == 1
-    # Subsequent call within 60s hits in-memory cache (0 HTTP requests)
+    # Subsequent call always fetches fresh from Facebook (no stale cache)
     again = await checker.fetch_profile_info("4")
-    assert again == ("Mark Zuckerberg", "https://scontent.xx.fbcdn.net/a.jpg")
-    assert sess.calls == 1
+    assert again == ("Mark Updated", "https://scontent.xx.fbcdn.net/a2.jpg")
+    assert sess.calls == 2
     await checker.close()
 
 
@@ -735,60 +736,8 @@ async def test_runtime_run_bot_full_lifecycle_and_clean_shutdown(
 
 
 @pytest.mark.asyncio
-async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_early_stop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # 1. Profile cache expiry and 512-entry eviction (both expired pruning and oldest eviction)
-    now_ref = [1000.0]
-    monkeypatch.setattr("src.core.checker.time.monotonic", lambda: now_ref[0])
-
-    sess = _FakeSession(
-        [
-            SimpleNamespace(
-                status_code=200,
-                text=(
-                    '<meta property="og:title" content="First" />'
-                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/1.jpg" />'
-                ),
-            ),
-            SimpleNamespace(
-                status_code=200,
-                text=(
-                    '<meta property="og:title" content="Refreshed" />'
-                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/2.jpg" />'
-                ),
-            ),
-        ]
-    )
-    checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
-    assert await checker.fetch_profile_info("1") == (
-        "First",
-        "https://scontent.xx.fbcdn.net/1.jpg",
-    )
-    now_ref[0] += 61.0
-    assert await checker.fetch_profile_info("1") == (
-        "Refreshed",
-        "https://scontent.xx.fbcdn.net/2.jpg",
-    )
-    assert len(sess.calls) == 2
-
-    # Fill 512 entries with expired items -> next cache write prunes expired entries
-    checker._profile_cache.clear()  # type: ignore[reportPrivateUsage]
-    for i in range(512):
-        checker._profile_cache[f"old_{i}"] = (now_ref[0] - 1.0, f"U{i}", None)  # type: ignore[reportPrivateUsage]
-    checker._cache_profile("fresh_1", "Fresh", None)  # type: ignore[reportPrivateUsage]
-    assert list(checker._profile_cache.keys()) == ["fresh_1"]  # type: ignore[reportPrivateUsage]
-
-    # Fill 512 live (non-expired) entries -> next cache write evicts oldest entry
-    checker._profile_cache.clear()  # type: ignore[reportPrivateUsage]
-    for i in range(512):
-        checker._profile_cache[f"live_{i}"] = (now_ref[0] + 60.0, f"U{i}", None)  # type: ignore[reportPrivateUsage]
-    checker._cache_profile("newest", "Newest", None)  # type: ignore[reportPrivateUsage]
-    assert "live_0" not in checker._profile_cache  # type: ignore[reportPrivateUsage]
-    assert "newest" in checker._profile_cache  # type: ignore[reportPrivateUsage]
-    assert len(checker._profile_cache) == 512  # type: ignore[reportPrivateUsage]
-
-    # 2. _read_head stops early on og:title + og:image before </head> and caps at 256 KB
+async def test_checker_inflight_cancel_avatar_limits_and_head_early_stop() -> None:
+    # 1. _read_head stops early on og:title + og:image before </head> and caps at 256 KB
     class _ChunkResp:
         def __init__(self, chunks: list[bytes]) -> None:
             self._chunks = chunks
@@ -901,11 +850,6 @@ async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_ear
         await checker_res.resolve_uid_from_url("https://www.facebook.com/vuinguyen.2026")
         == "100004030621748"
     )
-    # Profile info was pre-cached from resolve_uid_from_url (0 extra HTTP calls)
-    assert await checker_res.fetch_profile_info("100004030621748") == (
-        "Vui Nguyễn",
-        "https://scontent.xx.fbcdn.net/v.jpg",
-    )
     assert await checker_res.resolve_uid_from_url("https://www.facebook.com/share/1abc") == "4"
     assert await checker_res.resolve_uid_from_url("https://www.facebook.com/missing") is None
     assert len(resolve_sess.calls) == 3
@@ -929,3 +873,58 @@ async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_ear
     for t in (t1, t2):
         with pytest.raises(asyncio.CancelledError):
             await t
+
+
+@pytest.mark.asyncio
+async def test_core_hardening_group_throttle_ssrf_and_proxy_redaction() -> None:
+    from pydantic import ValidationError
+
+    from src.core.checker import (
+        _is_allowed_fb_url,  # type: ignore[reportPrivateUsage]
+        _redact_proxy_auth,  # type: ignore[reportPrivateUsage]
+    )
+
+    # 1. Invalid LOG_LEVEL fails fast
+    with pytest.raises(ValidationError):
+        Settings(bot_token="t", log_level="TRACE")
+
+    # 2. SSRF allowlist & proxy credential redaction
+    assert _is_allowed_fb_url("https://www.facebook.com/zuck") is True
+    assert _is_allowed_fb_url("https://fb.watch/abc") is True
+    assert _is_allowed_fb_url("http://127.0.0.1:8080/admin") is False
+    assert _is_allowed_fb_url("https://evil.com/facebook.com") is False
+    assert (
+        _redact_proxy_auth("proxy failed via http://user1:s3cr3t@10.0.0.1:8080")
+        == "proxy failed via http://***:***@10.0.0.1:8080"
+    )
+
+    sess = _FakeSession([])
+    checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
+    assert await checker.resolve_uid_from_url("http://169.254.169.254/latest") is None
+    assert len(sess.calls) == 0
+
+    # 3. ThrottlingMiddleware skips normal group chatter, throttles commands in group
+    mw = ThrottlingMiddleware(limit_per_minute=1)
+    handler = AsyncMock(return_value="ok")
+    group_chat = SimpleNamespace(id=-1001, type="group")
+    chatter = MagicMock(spec=Message)
+    chatter.from_user = SimpleNamespace(id=77)
+    chatter.chat = group_chat
+    chatter.text = "hello everyone"
+    chatter.document = None
+    chatter.reply_to_message = None
+    await mw(handler, chatter, {})
+    await mw(handler, chatter, {})
+    assert handler.await_count == 2
+
+    cmd_msg = MagicMock(spec=Message)
+    cmd_msg.from_user = SimpleNamespace(id=77)
+    cmd_msg.chat = group_chat
+    cmd_msg.text = "/check 4"
+    cmd_msg.document = None
+    cmd_msg.reply_to_message = None
+    cmd_msg.answer = AsyncMock()
+    await mw(handler, cmd_msg, {})
+    await mw(handler, cmd_msg, {})
+    assert handler.await_count == 3
+    cmd_msg.answer.assert_awaited_once()

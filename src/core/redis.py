@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import uuid
 from typing import Any
 from urllib.parse import urlparse
@@ -61,7 +62,7 @@ class RedisLock:
             return
         full_key = f"{self._prefix}:lock:{key}"
         async with self._redis.pipeline(transaction=True) as pipe:
-            try:
+            with contextlib.suppress(WatchError):
                 await pipe.watch(full_key)
                 if await pipe.get(full_key) == token:
                     pipe.multi()
@@ -69,5 +70,3 @@ class RedisLock:
                     await pipe.execute()
                 else:
                     await pipe.unwatch()
-            except WatchError:
-                pass
