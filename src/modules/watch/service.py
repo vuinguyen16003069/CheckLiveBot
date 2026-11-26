@@ -168,7 +168,6 @@ class RedisWatchRepository:
             live_detected_at=now if status == WatchStatus.LIVE else None,
             completed_at=now if status in (WatchStatus.DONE, WatchStatus.CANCELLED) else None,
         )
-        expiry_score = self._policy.expiry_ts(item)
         status_score = self._policy.anchor_time(item).timestamp()
         item_ttl = self._policy.seconds_for_status(status)
         container_ttl = self._policy.max_watch_ttl_seconds
@@ -180,7 +179,7 @@ class RedisWatchRepository:
             if self._policy.seq_ttl_seconds > 0:
                 pipe.expire(seq_key, self._policy.seq_ttl_seconds)
             pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=item_ttl)
-            pipe.zadd(chat_key, {str(watch_id): expiry_score})
+            pipe.zadd(chat_key, {str(watch_id): status_score})
             pipe.expire(chat_key, container_ttl)
             pipe.zadd(status_key, {str(watch_id): status_score})
             pipe.expire(status_key, item_ttl)
@@ -245,7 +244,7 @@ class RedisWatchRepository:
             pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=item_ttl)
             pipe.hset(uid_key, item.uid, str(item.id))
             pipe.expire(uid_key, container_ttl)
-            pipe.zadd(chat_key, {str(item.id): self._policy.expiry_ts(item)})
+            pipe.zadd(chat_key, {str(item.id): status_score})
             pipe.expire(chat_key, container_ttl)
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
@@ -319,11 +318,7 @@ class RedisWatchRepository:
             if status_filter
             else self._k(f"watches:chat:{chat_id}")
         )
-        cutoff = (
-            self._policy.cutoff_ts(status_filter, now)
-            if status_filter is not None
-            else _ensure_utc(now or datetime.now(UTC)).timestamp()
-        )
+        cutoff = self._policy.cutoff_ts(status_filter, now)
         if page <= 1:
             async with self._redis.pipeline(transaction=False) as pipe:
                 pipe.zremrangebyscore(key, "-inf", cutoff)
