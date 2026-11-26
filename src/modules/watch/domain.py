@@ -174,10 +174,10 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         lines.append(f"⚠️ <b>FAQ:</b> {_spoiler(faq_raw, item.is_hidden)}")
 
     progress_line = {
-        WatchStatus.DIE: "🔴 <b>Tiến trình:</b> Đang theo dõi chờ LIVE",
-        WatchStatus.LIVE: "🟢 <b>Tiến trình:</b> Đã LIVE lại",
-        WatchStatus.DONE: "✅ <b>Tiến trình:</b> Đã Done kèo",
-        WatchStatus.CANCELLED: "❌ <b>Tiến trình:</b> Đã Hủy kèo",
+        WatchStatus.DIE: "<b>Tiến trình:</b> Đang theo dõi chờ LIVE 🔴",
+        WatchStatus.LIVE: "<b>Tiến trình:</b> Đã LIVE lại 🟢",
+        WatchStatus.DONE: "<b>Tiến trình:</b> Đã Done kèo ✅" ,
+        WatchStatus.CANCELLED: "<b>Tiến trình:</b> Đã Hủy kèo ❌",
     }[item.status]
     lines.append(progress_line)
 
