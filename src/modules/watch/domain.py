@@ -176,7 +176,7 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
     progress_line = {
         WatchStatus.DIE: "<b>Tiến trình:</b> Đang theo dõi chờ LIVE 🔴",
         WatchStatus.LIVE: "<b>Tiến trình:</b> Đã LIVE lại 🟢",
-        WatchStatus.DONE: "<b>Tiến trình:</b> Đã Done kèo ✅" ,
+        WatchStatus.DONE: "<b>Tiến trình:</b> Đã Done kèo ✅",
         WatchStatus.CANCELLED: "<b>Tiến trình:</b> Đã Hủy kèo ❌",
     }[item.status]
     lines.append(progress_line)
@@ -272,17 +272,11 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
 
 
 def format_watch_stats(stats: WatchStats) -> str:
-    lines = [
-        "📊 <b>Thống kê kèo hiện có</b>",
-        "",
-        f"• Tổng số kèo: <b>{stats.total}</b>",
-        f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>",
-        f"• 🟢 Đã về LIVE: <b>{stats.live}</b>",
-        f"• ✅ Đã Done: <b>{stats.done}</b>",
-        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>",
-    ]
-    if stats.total > 0:
-        resolved = stats.live + stats.done
-        pct = round((resolved / stats.total) * 100)
-        lines.append(f"• 📈 Tỷ lệ xử lý: <b>{resolved}/{stats.total}</b> ({pct}%)")
-    return "\n".join(lines)
+    return (
+        "📊 <b>Thống kê kèo hiện có</b>\n\n"
+        f"• Tổng số kèo: <b>{stats.total}</b>\n"
+        f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>\n"
+        f"• 🟢 Đã về LIVE: <b>{stats.live}</b>\n"
+        f"• ✅ Đã Done: <b>{stats.done}</b>\n"
+        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>"
+    )
