@@ -168,6 +168,7 @@ class RedisWatchRepository:
             live_detected_at=now if status == WatchStatus.LIVE else None,
             completed_at=now if status in (WatchStatus.DONE, WatchStatus.CANCELLED) else None,
         )
+        created_score = now.timestamp()
         status_score = self._policy.anchor_time(item).timestamp()
         item_ttl = self._policy.seconds_for_status(status)
         container_ttl = self._policy.max_watch_ttl_seconds
@@ -179,7 +180,7 @@ class RedisWatchRepository:
             if self._policy.seq_ttl_seconds > 0:
                 pipe.expire(seq_key, self._policy.seq_ttl_seconds)
             pipe.set(self._k(f"watch:{watch_id}"), item.model_dump_json(), ex=item_ttl)
-            pipe.zadd(chat_key, {str(watch_id): status_score})
+            pipe.zadd(chat_key, {str(watch_id): created_score})
             pipe.expire(chat_key, container_ttl)
             pipe.zadd(status_key, {str(watch_id): status_score})
             pipe.expire(status_key, item_ttl)
@@ -244,7 +245,6 @@ class RedisWatchRepository:
             pipe.set(self._k(f"watch:{item.id}"), item.model_dump_json(), ex=item_ttl)
             pipe.hset(uid_key, item.uid, str(item.id))
             pipe.expire(uid_key, container_ttl)
-            pipe.zadd(chat_key, {str(item.id): status_score})
             pipe.expire(chat_key, container_ttl)
             if previous_status is not None and previous_status != item.status:
                 pipe.zrem(
@@ -318,21 +318,24 @@ class RedisWatchRepository:
             if status_filter
             else self._k(f"watches:chat:{chat_id}")
         )
-        cutoff = self._policy.cutoff_ts(status_filter, now)
+        cutoff = self._policy.cutoff_ts(status_filter, now) if status_filter is not None else None
         if page <= 1:
             async with self._redis.pipeline(transaction=False) as pipe:
-                pipe.zremrangebyscore(key, "-inf", cutoff)
+                if cutoff is not None:
+                    pipe.zremrangebyscore(key, "-inf", cutoff)
                 pipe.zcard(key)
                 pipe.zrevrange(key, 0, page_size - 1)
-                _, total_raw, ids = await pipe.execute()
-            total = int(total_raw)
+                results = await pipe.execute()
+            total = int(results[-2])
+            ids = results[-1]
             total_pages = max(1, math.ceil(total / page_size))
         else:
             async with self._redis.pipeline(transaction=False) as pipe:
-                pipe.zremrangebyscore(key, "-inf", cutoff)
+                if cutoff is not None:
+                    pipe.zremrangebyscore(key, "-inf", cutoff)
                 pipe.zcard(key)
-                _, total_raw = await pipe.execute()
-            total = int(total_raw)
+                results = await pipe.execute()
+            total = int(results[-1])
             total_pages = max(1, math.ceil(total / page_size))
             safe_page = min(page, total_pages)
             start = (safe_page - 1) * page_size
