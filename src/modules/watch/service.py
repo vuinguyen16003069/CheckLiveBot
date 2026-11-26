@@ -466,9 +466,14 @@ class WatchService:
             fb_url = extract_fb_url(first_part)
             if fb_url:
                 resolved = await self._checker.resolve_uid_from_url(fb_url)
-                if resolved:
-                    rest = raw_args.split("|", 1)[1] if "|" in raw_args else ""
-                    raw_args = f"{resolved} | {rest}" if rest else resolved
+                if not resolved:
+                    raise ValueError(
+                        "Không lấy được UID từ link Facebook này — tài khoản có thể đã DIE, "
+                        "bị khóa hoặc để chế độ riêng tư.\n"
+                        "👉 Vui lòng nhập trực tiếp UID số (1–20 chữ số)."
+                    )
+                rest = raw_args.split("|", 1)[1] if "|" in raw_args else ""
+                raw_args = f"{resolved} | {rest}" if rest else resolved
         parsed = parse_add_line(raw_args)
         add_lock_key = f"add:{chat_id}:{parsed.uid}"
         lock_acquired = False

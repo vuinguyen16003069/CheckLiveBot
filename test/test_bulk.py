@@ -687,6 +687,11 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
     await msg_handlers["handle_smart_plain_text"](m_vanity, state)
     m_vanity.answer.assert_awaited_once()
 
+    # Unresolvable Facebook share/vanity link gives clear DIE/private guidance
+    m_dead_share = _make_msg("https://www.facebook.com/share/1FDDT4Su9K/?mibextid=wwXIfr")
+    await msg_handlers["handle_smart_plain_text"](m_dead_share, state)
+    assert "tài khoản có thể đã DIE" in m_dead_share.answer.call_args.args[0]
+
     # cb_recheck_single on a LIVE photo message that turns DIE replaces it with plain text
     q_to_die = MagicMock()
     q_to_die.message = _make_msg()

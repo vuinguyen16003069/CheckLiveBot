@@ -87,13 +87,11 @@ CheckLiveBot/
 │           ├── domain.py           # BulkSummary, fast-path parser, progress (UID/s, ETA) & file kết quả
 │           ├── service.py          # BulkCheckService (iter worker pool, progress task, hủy job)
 │           └── handlers.py         # /check, smart plain-text, nhận file .txt & TelegramBulkNotifier
-├── scripts/
-│   └── redis_admin.py              # Công cụ CLI quản lý/sao lưu Redis
 ├── test/
 │   ├── test_core.py                # Config, checker, ProxyPool cooldown, Singleflight, RedisLock, loop
 │   ├── test_watch.py               # Watch domain/UI/service, cô lập lỗi, lock, TTL 90d & filters
 │   ├── test_bulk.py                # Parse 10k+ UID, BulkCheckService, hủy job & flood cooldown
-│   └── test_redis.py               # Unit test offline cho scripts/redis_admin.py
+│   └── test_redis.py               # Công cụ CLI quản lý/sao lưu Redis + unit test offline
 ├── Dockerfile                      # Multi-stage build siêu gọn bằng uv (--no-dev)
 ├── docker-compose.yml              # bot + redis 7 (AOF)
 ├── Procfile                        # Heroku: worker (python main.py)
@@ -372,11 +370,11 @@ heroku logs --tail
 ### Công cụ CLI chẩn đoán & sao lưu Redis
 ```powershell
 # Mở menu tương tác (xem dung lượng, duyệt nhóm key, xóa key, export JSON)
-uv run python scripts/redis_admin.py
+uv run python test/test_redis.py
 
 # Hoặc chạy nhanh theo cờ lệnh
-uv run python scripts/redis_admin.py --info
-uv run python scripts/redis_admin.py --export backup.json
+uv run python test/test_redis.py --info
+uv run python test/test_redis.py --export backup.json
 ```
 
 ### Kiểm thử, chất lượng mã nguồn & cập nhật thư viện

@@ -82,23 +82,14 @@ class BulkCheckService:
         return None
 
     async def check_single_uid(self, raw_uid: str) -> tuple[str, CheckOutcome]:
-        uid = await self.resolve_input_uid(raw_uid)
-        if not uid:
-            raise ValueError(
-                "Không tìm thấy UID hợp lệ (cần UID 1–20 chữ số hoặc link trang cá nhân Facebook công khai)."
-            )
-
+        uid = await self._require_single_uid(raw_uid)
         result = await self._checker.check(uid)
         return uid, result.outcome
 
     async def check_single_uid_profile(
         self, raw_uid: str
     ) -> tuple[str, CheckOutcome, str | None, str | None]:
-        uid = await self.resolve_input_uid(raw_uid)
-        if not uid:
-            raise ValueError(
-                "Không tìm thấy UID hợp lệ (cần UID 1–20 chữ số hoặc link trang cá nhân Facebook công khai)."
-            )
+        uid = await self._require_single_uid(raw_uid)
 
         profile_task = asyncio.create_task(self._checker.fetch_profile_info(uid))
         try:
@@ -116,6 +107,20 @@ class BulkCheckService:
                 with contextlib.suppress(asyncio.CancelledError):
                     await profile_task
             raise
+
+    async def _require_single_uid(self, raw_uid: str) -> str:
+        uid = await self.resolve_input_uid(raw_uid)
+        if uid:
+            return uid
+        if extract_fb_url(raw_uid) is not None:
+            raise ValueError(
+                "Không lấy được UID từ link Facebook này — tài khoản có thể đã DIE, "
+                "bị khóa hoặc để chế độ riêng tư.\n"
+                "👉 Vui lòng dán trực tiếp UID số (1–20 chữ số) để kiểm tra chính xác."
+            )
+        raise ValueError(
+            "Không tìm thấy UID hợp lệ (cần UID 1–20 chữ số hoặc link trang cá nhân Facebook công khai)."
+        )
 
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         return await self._checker.fetch_avatar_bytes(url)

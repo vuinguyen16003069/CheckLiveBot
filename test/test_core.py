@@ -928,3 +928,27 @@ async def test_core_hardening_group_throttle_ssrf_and_proxy_redaction() -> None:
     await mw(handler, cmd_msg, {})
     assert handler.await_count == 3
     cmd_msg.answer.assert_awaited_once()
+
+    # 4. resolve_uid_from_url streams past </head> to extract userID in body when needed
+    class _BodyUidResp:
+        status_code = 200
+        url = "https://www.facebook.com/vanity.user"
+
+        async def aiter_content(self) -> Any:
+            yield b'<html><head><meta property="og:title" content="X" /><meta property="og:image" content="https://scontent.xx.fbcdn.net/x.jpg" /></head>'
+            yield b'<body><script>{"userID":"100098765432100"}</script></body></html>'
+
+    class _BodyUidSession:
+        async def get(self, url: str, **kwargs: Any) -> Any:
+            return _BodyUidResp()
+
+        async def close(self) -> None:
+            return None
+
+    body_checker = CurlCffiFacebookChecker(session=_BodyUidSession())  # type: ignore[arg-type]
+    assert (
+        await body_checker.resolve_uid_from_url(
+            "https://www.facebook.com/share/1FDDT4Su9K/?mibextid=wwXIfr"
+        )
+        == "100098765432100"
+    )

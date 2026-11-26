@@ -328,8 +328,7 @@ class CurlCffiFacebookChecker:
                     self._proxy_pool.report_failure(proxy)
                     return None
 
-                body = await self._read_head(response)
-            uid = parse_uid_from_profile_html(body)
+                uid = await self._read_uid_from_response(response)
             if uid:
                 self._proxy_pool.report_success(proxy)
                 return uid
@@ -386,6 +385,21 @@ class CurlCffiFacebookChecker:
             ):
                 break
         return buf.decode("utf-8", errors="ignore")
+
+    @staticmethod
+    async def _read_uid_from_response(response: Any, max_bytes: int = 524288) -> str | None:
+        if not callable(getattr(response, "aiter_content", None)):
+            text = getattr(response, "text", "")
+            return parse_uid_from_profile_html(text) if isinstance(text, str) else None
+
+        buf = bytearray()
+        async for chunk in response.aiter_content():
+            buf.extend(chunk)
+            if uid := parse_uid_from_profile_html(buf.decode("utf-8", errors="ignore")):
+                return uid
+            if len(buf) >= max_bytes:
+                break
+        return None
 
     async def _check_direct(self, uid: str) -> UidCheckResult:
         url = f"https://graph.facebook.com/{uid}/picture?type=normal&redirect=false"
