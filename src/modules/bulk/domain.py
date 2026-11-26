@@ -157,7 +157,7 @@ def format_bulk_summary(summary: BulkSummary) -> str:
         f"• Tổng UID: <b>{summary.total:,}</b>\n"
         f"• ✅ LIVE: <b>{summary.live:,}</b>\n"
         f"• ❌ DIE: <b>{summary.die:,}</b>\n"
-        f"• ⚠️ ERROR: <b>{summary.error:,}</b>\n"
+        f"• ⚠️ Lỗi: <b>{summary.error:,}</b>\n"
         f"• ⏱ Thời gian: <b>{summary.elapsed_seconds:.1f}s</b>"
         f"{truncated_line}"
     )

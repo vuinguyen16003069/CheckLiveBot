@@ -123,7 +123,7 @@ def build_single_check_markup(uid: str, outcome: CheckOutcome) -> InlineKeyboard
                 url=f"https://www.facebook.com/profile.php?id={uid}",
             )
         )
-    else:
+    elif outcome == CheckOutcome.DIE:
         row.append(
             InlineKeyboardButton(
                 text="➕ Lên kèo UID này",

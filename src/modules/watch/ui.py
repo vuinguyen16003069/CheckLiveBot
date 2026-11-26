@@ -98,6 +98,10 @@ def build_wizard_keyboard(step: int, *, min_step: int = 1) -> InlineKeyboardMark
                     text="583",
                     callback_data=WizardCallback(action="pick_faq", value="583").pack(),
                 ),
+                InlineKeyboardButton(
+                    text="⏭ Bỏ qua",
+                    callback_data=WizardCallback(action="skip_faq").pack(),
+                ),
             ]
         )
 
@@ -153,84 +157,53 @@ def build_watch_keyboard(
     back_status: str | None = "ALL",
     back_page: int = 1,
 ) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            InlineKeyboardButton(
-                text="🙈 Ẩn thông tin",
-                callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
-            ),
-            InlineKeyboardButton(
-                text="🐵 Hiện thông tin",
-                callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
-            ),
-        ],
-    ]
+    toggle_btn = (
+        InlineKeyboardButton(
+            text="🐵 Hiện thông tin",
+            callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
+        )
+        if item.is_hidden
+        else InlineKeyboardButton(
+            text="🙈 Ẩn thông tin",
+            callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
+        )
+    )
+    rows: list[list[InlineKeyboardButton]] = [[toggle_btn]]
+
+    def _btn(text: str, action: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            text=text,
+            callback_data=WatchActionCallback(action=action, watch_id=item.id).pack(),
+        )
+
+    back_btn = (
+        InlineKeyboardButton(
+            text="🔙 Về danh sách",
+            callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
+        )
+        if back_status is not None
+        else None
+    )
+
     if item.status == WatchStatus.DIE:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="❌ Hủy kèo",
-                    callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🗑 Xóa",
-                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-        footer_row: list[InlineKeyboardButton] = [
-            InlineKeyboardButton(
-                text="✏️ Sửa",
-                callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
-            )
-        ]
-        if back_status is not None:
-            footer_row.append(
-                InlineKeyboardButton(
-                    text="🔙 Về danh sách",
-                    callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
-                )
-            )
-        rows.append(footer_row)
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="❌ Hủy kèo",
-                    callback_data=WatchActionCallback(action="cancel", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="✅ Done kèo",
-                    callback_data=WatchActionCallback(action="done", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="✏️ Sửa",
-                    callback_data=WatchActionCallback(action="edit", watch_id=item.id).pack(),
-                ),
-                InlineKeyboardButton(
-                    text="🗑 Xóa",
-                    callback_data=WatchActionCallback(action="delete", watch_id=item.id).pack(),
-                ),
-            ]
-        )
-        footer_row: list[InlineKeyboardButton] = [
-            InlineKeyboardButton(
-                text="🔄 Tiếp tục theo dõi",
-                callback_data=WatchActionCallback(action="continue", watch_id=item.id).pack(),
-            )
-        ]
-        if back_status is not None:
-            footer_row.append(
-                InlineKeyboardButton(
-                    text="🔙 Về danh sách",
-                    callback_data=ListPageCallback(status=back_status, page=back_page).pack(),
-                )
-            )
-        rows.append(footer_row)
+        rows.append([_btn("❌ Hủy kèo", "cancel"), _btn("🗑 Xóa", "delete")])
+        footer: list[InlineKeyboardButton] = [_btn("✏️ Sửa", "edit")]
+    elif item.status == WatchStatus.LIVE:
+        rows.append([_btn("❌ Hủy kèo", "cancel"), _btn("✅ Done kèo", "done")])
+        rows.append([_btn("✏️ Sửa", "edit"), _btn("🗑 Xóa", "delete")])
+        footer = [_btn("🔄 Tiếp tục theo dõi", "continue")]
+    elif item.status == WatchStatus.DONE:
+        rows.append([_btn("🔄 Tiếp tục theo dõi", "continue"), _btn("✏️ Sửa", "edit")])
+        rows.append([_btn("❌ Hủy kèo", "cancel"), _btn("🗑 Xóa", "delete")])
+        footer = []
+    else:  # CANCELLED
+        rows.append([_btn("🔄 Tiếp tục theo dõi", "continue"), _btn("✏️ Sửa", "edit")])
+        footer = [_btn("🗑 Xóa", "delete")]
+
+    if back_btn is not None:
+        footer.append(back_btn)
+    if footer:
+        rows.append(footer)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

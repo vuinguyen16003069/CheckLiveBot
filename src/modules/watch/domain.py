@@ -173,13 +173,13 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         )
         lines.append(f"⚠️ <b>FAQ:</b> {_spoiler(faq_raw, item.is_hidden)}")
 
-    progress_label = {
-        WatchStatus.DIE: "🔴 Đang theo dõi chờ LIVE ✅",
-        WatchStatus.LIVE: "✅ Đã LIVE lại / Hoàn tất ✅",
-        WatchStatus.DONE: "✅ Đã Done kèo ✅",
-        WatchStatus.CANCELLED: "❌ Đã Hủy kèo",
+    progress_line = {
+        WatchStatus.DIE: "🔴 <b>Tiến trình:</b> Đang theo dõi chờ LIVE",
+        WatchStatus.LIVE: "🟢 <b>Tiến trình:</b> Đã LIVE lại",
+        WatchStatus.DONE: "✅ <b>Tiến trình:</b> Đã Done kèo",
+        WatchStatus.CANCELLED: "❌ <b>Tiến trình:</b> Đã Hủy kèo",
     }[item.status]
-    lines.append(f"🔄 <b>Tiến trình:</b> {progress_label}")
+    lines.append(progress_line)
 
     aware_time = (
         item.created_at
@@ -218,7 +218,7 @@ def format_watch_list(
     bot_username: str | None = None,
 ) -> str:
     header = (
-        f"📋 <b>Danh sách kèo</b>  •  <b>{html.escape(status_filter)}</b>  "
+        f"📋 <b>Danh sách kèo</b> · <b>{html.escape(status_filter)}</b> "
         f"(Trang {page}/{total_pages} · {total_items} kèo)"
     )
     if not items:
@@ -243,7 +243,7 @@ def format_watch_list(
         faq_part = f"  [{html.escape(item.faq)}]" if item.faq else ""
         note_display = _format_list_note(item.note)
         blocks.append(
-            f"{badge} <b>#\u200b{item.id}</b> · {uid_display}  •  <b>{price_display}</b>{faq_part}\n"
+            f"{badge} <b>#\u200b{item.id}</b> · {uid_display} · <b>{price_display}</b>{faq_part}\n"
             f"   └ {note_display}"
         )
     hint = (
@@ -272,11 +272,17 @@ def format_welcome_dashboard(stats: WatchStats) -> str:
 
 
 def format_watch_stats(stats: WatchStats) -> str:
-    return (
-        "📊 <b>Thống kê kèo hiện có</b>\n\n"
-        f"• Tổng số kèo: <b>{stats.total}</b>\n"
-        f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>\n"
-        f"• 🟢 Đã về LIVE: <b>{stats.live}</b>\n"
-        f"• ✅ Đã Done: <b>{stats.done}</b>\n"
-        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>"
-    )
+    lines = [
+        "📊 <b>Thống kê kèo hiện có</b>",
+        "",
+        f"• Tổng số kèo: <b>{stats.total}</b>",
+        f"• 🔴 Đang theo dõi (DIE): <b>{stats.die}</b>",
+        f"• 🟢 Đã về LIVE: <b>{stats.live}</b>",
+        f"• ✅ Đã Done: <b>{stats.done}</b>",
+        f"• ❌ Đã Hủy: <b>{stats.cancelled}</b>",
+    ]
+    if stats.total > 0:
+        resolved = stats.live + stats.done
+        pct = round((resolved / stats.total) * 100)
+        lines.append(f"• 📈 Tỷ lệ xử lý: <b>{resolved}/{stats.total}</b> ({pct}%)")
+    return "\n".join(lines)

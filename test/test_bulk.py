@@ -163,6 +163,10 @@ def test_extract_uids_deduplicates_caps_and_formats() -> None:
 def test_single_check_markup_and_notifier_behavior() -> None:
     live_kb = build_single_check_markup("4", CheckOutcome.LIVE)
     assert [b.text for b in live_kb.inline_keyboard[0]] == ["🔗 Mở Facebook", "🔄 Check lại"]
+    die_kb = build_single_check_markup("4", CheckOutcome.DIE)
+    assert [b.text for b in die_kb.inline_keyboard[0]] == ["➕ Lên kèo UID này", "🔄 Check lại"]
+    err_kb = build_single_check_markup("4", CheckOutcome.ERROR)
+    assert [b.text for b in err_kb.inline_keyboard[0]] == ["🔄 Check lại"]
     assert live_kb.inline_keyboard[0][0].url == "https://www.facebook.com/profile.php?id=4"
 
     die_kb = build_single_check_markup("10001", CheckOutcome.DIE)
