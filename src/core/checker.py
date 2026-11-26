@@ -172,6 +172,7 @@ class CurlCffiFacebookChecker:
         url = f"https://www.facebook.com/profile.php?id={uid}"
         kwargs: dict[str, Any] = {
             "timeout": (4.0, max(6.0, self._timeout)),
+            "allow_redirects": True,
             "stream": True,
             "headers": {
                 "User-Agent": "WhatsApp/2.23.20.0",
@@ -187,12 +188,20 @@ class CurlCffiFacebookChecker:
         try:
             response = await self._profile_session.get(url, **kwargs)
             status = int(getattr(response, "status_code", 200))
+            final_url = str(getattr(response, "url", url) or url)
             if status >= 400:
                 self._proxy_pool.report_failure(proxy)
                 logger.warning(
                     "fb_profile_info_http_error uid=%s status=%s url=%s", uid, status, url
                 )
                 return None, None
+            if _is_login_or_checkpoint_url(final_url):
+                self._proxy_pool.report_failure(proxy)
+                logger.warning(
+                    "fb_profile_info_login_wall uid=%s final_url=%s", uid, final_url
+                )
+                return None, None
+
             body = await self._read_head(response)
             result = parse_public_profile_html(body) if body else (None, None)
             if result[0] is not None or result[1] is not None:
@@ -204,7 +213,7 @@ class CurlCffiFacebookChecker:
                 uid,
                 status,
                 url,
-                getattr(response, "url", url),
+                final_url,
             )
             return None, None
         except Exception as exc:
@@ -219,28 +228,55 @@ class CurlCffiFacebookChecker:
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         if not url or not url.startswith(("http://", "https://")):
             return None
-        kwargs: dict[str, Any] = {"timeout": (4.0, max(6.0, self._timeout))}
+
+        kwargs: dict[str, Any] = {
+            "timeout": (4.0, max(6.0, self._timeout)),
+            "allow_redirects": True,
+            "headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        }
         proxy = self._proxy_pool.next_proxy()
         if proxy:
             kwargs["proxy"] = proxy
+
         try:
             response: Any = await self._profile_session.get(url, **kwargs)
             status = int(getattr(response, "status_code", 200))
             if status != 200:
+                self._proxy_pool.report_failure(proxy)
+                logger.warning("fb_avatar_http_error status=%s", status)
                 return None
-            headers: Any = getattr(response, "headers", None)
+            resp_headers: Any = getattr(response, "headers", None)
             content_type = (
-                str(headers.get("content-type", "") or headers.get("Content-Type", "")).lower()
-                if callable(getattr(headers, "get", None))
+                str(
+                    resp_headers.get("content-type", "") or resp_headers.get("Content-Type", "")
+                ).lower()
+                if callable(getattr(resp_headers, "get", None))
                 else ""
             )
             if content_type and not content_type.startswith("image/"):
+                self._proxy_pool.report_failure(proxy)
+                logger.warning("fb_avatar_non_image content_type=%s", content_type)
                 return None
             content = getattr(response, "content", b"")
-            if isinstance(content, (bytes, bytearray)) and 0 < len(content) <= 5 * 1024 * 1024:
-                return bytes(content)
-            return None
+            if not isinstance(content, (bytes, bytearray)) or not (
+                0 < len(content) <= 5 * 1024 * 1024
+            ):
+                return None
+            head_sample = bytes(content[:32]).lstrip().lower()
+            if head_sample.startswith((b"<html", b"<!doctype")):
+                self._proxy_pool.report_failure(proxy)
+                logger.warning("fb_avatar_html_payload")
+                return None
+            self._proxy_pool.report_success(proxy)
+            return bytes(content)
         except Exception as exc:
+            self._proxy_pool.report_failure(proxy)
             logger.warning("fb_avatar_download_failed error=%s", exc)
             return None
 
@@ -285,7 +321,7 @@ class CurlCffiFacebookChecker:
             if uid:
                 self._proxy_pool.report_success(proxy)
                 name, avatar = parse_public_profile_html(body)
-                if name is not None or avatar is not None:
+                if name is not None and avatar is not None:
                     self._cache_profile(uid, name, avatar)
                 return uid
             return None
@@ -488,6 +524,20 @@ def parse_uid_from_profile_html(body: str) -> str | None:
 
 def parse_public_profile_html(body: str) -> tuple[str | None, str | None]:
     return _extract_name(body), _extract_avatar(body)
+
+
+def _is_login_or_checkpoint_url(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "/login",
+            "/checkpoint",
+            "/recover/",
+            "login.php",
+            "unsupportedbrowser",
+        )
+    )
 
 
 def _contains_any(text: str, markers: Sequence[str]) -> bool:

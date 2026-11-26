@@ -53,13 +53,25 @@ logger = logging.getLogger(__name__)
 async def _resolve_watch_photo(
     item: WatchItem,
     fetch_bytes: Callable[[str], Awaitable[bytes | None]] | None,
+    refresh_profile: Callable[[str], Awaitable[tuple[str | None, str | None]]] | None = None,
 ) -> str | BufferedInputFile | None:
     if item.avatar_file_id:
         return item.avatar_file_id
-    if item.avatar_url and fetch_bytes is not None:
+    if fetch_bytes is None:
+        return None
+    if item.avatar_url:
         avatar_bytes = await fetch_bytes(item.avatar_url)
         if avatar_bytes:
             return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
+    if refresh_profile is not None and item.status != WatchStatus.DIE:
+        fresh_name, fresh_avatar = await refresh_profile(item.uid)
+        if fresh_name:
+            item.fb_name = fresh_name
+        if fresh_avatar and fresh_avatar != item.avatar_url:
+            item.avatar_url = fresh_avatar
+            avatar_bytes = await fetch_bytes(fresh_avatar)
+            if avatar_bytes:
+                return BufferedInputFile(avatar_bytes, filename=f"{item.uid}.jpg")
     return None
 
 
@@ -69,10 +81,11 @@ class TelegramWatchNotifier:
         self._checker = checker
 
     async def notify_live(self, item: WatchItem) -> None:
+        fetch_bytes = self._checker.fetch_avatar_bytes if self._checker is not None else None
+        refresh_profile = self._checker.fetch_profile_info if self._checker is not None else None
+        photo = await _resolve_watch_photo(item, fetch_bytes, refresh_profile)
         text = format_live_notification(item)
         markup = build_watch_keyboard(item)
-        fetch_bytes = self._checker.fetch_avatar_bytes if self._checker is not None else None
-        photo = await _resolve_watch_photo(item, fetch_bytes)
 
         async def _send() -> None:
             if photo is not None:
@@ -87,8 +100,15 @@ class TelegramWatchNotifier:
                     if sent.photo:
                         item.avatar_file_id = sent.photo[-1].file_id
                     return
-                except TelegramBadRequest:
-                    pass
+                except TelegramBadRequest as exc:
+                    if isinstance(photo, str):
+                        item.avatar_file_id = ""
+                    logger.warning(
+                        "watcher_notify_photo_failed watch_id=%s uid=%s error=%s",
+                        item.id,
+                        item.uid,
+                        exc,
+                    )
             await self._bot.send_message(chat_id=item.chat_id, text=text, reply_markup=markup)
 
         try:
@@ -661,10 +681,13 @@ async def _answer_watch_card(
     reply_markup: InlineKeyboardMarkup | None = None,
     watch_service: WatchService | None = None,
 ) -> None:
-    text = format_watch_card(item, title=title)
     if item.status != WatchStatus.DIE:
         fetch_bytes = watch_service.fetch_avatar_bytes if watch_service is not None else None
-        photo = await _resolve_watch_photo(item, fetch_bytes)
+        refresh_profile = watch_service.fetch_profile_info if watch_service is not None else None
+        old_name = item.fb_name
+        old_url = item.avatar_url
+        photo = await _resolve_watch_photo(item, fetch_bytes, refresh_profile)
+        text = format_watch_card(item, title=title)
         if photo is not None:
             try:
                 sent = await message.answer_photo(
@@ -675,10 +698,25 @@ async def _answer_watch_card(
                 )
                 if sent.photo and watch_service is not None:
                     with contextlib.suppress(Exception):
-                        await watch_service.save_avatar_file_id(item, sent.photo[-1].file_id)
+                        await watch_service.save_profile_snapshot(
+                            item,
+                            fb_name=item.fb_name if item.fb_name != old_name else None,
+                            avatar_url=item.avatar_url if item.avatar_url != old_url else None,
+                            avatar_file_id=sent.photo[-1].file_id,
+                        )
                 return
-            except TelegramBadRequest:
-                pass
+            except TelegramBadRequest as exc:
+                logger.warning(
+                    "watch_card_photo_failed watch_id=%s uid=%s error=%s",
+                    item.id,
+                    item.uid,
+                    exc,
+                )
+                if isinstance(photo, str) and watch_service is not None:
+                    with contextlib.suppress(Exception):
+                        await watch_service.save_profile_snapshot(item, avatar_file_id="")
+    else:
+        text = format_watch_card(item, title=title)
     await message.answer(text, reply_markup=reply_markup)
 
 

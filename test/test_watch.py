@@ -1049,6 +1049,40 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
     m_card_fail.answer = AsyncMock()
     await _answer_watch_card(m_card_fail, live_card_item, watch_service=svc)
     m_card_fail.answer.assert_awaited_once()
+    # Stale file_id cleared after TelegramBadRequest
+    assert live_card_item.avatar_file_id == ""
+
+    # Refresh expired/missing avatar_url via fetch_profile_info when opening LIVE card
+    expired_item = await repo.create(
+        chat_id=30,
+        owner_user_id=1,
+        uid="4",
+        fb_name="",
+        avatar_url="https://scontent.xx.fbcdn.net/expired.jpg",
+        note="Expired CDN",
+        price="50k",
+        faq="",
+        status=WatchStatus.LIVE,
+    )
+    orig_fetch = fail_checker.fetch_avatar_bytes
+    fail_checker.mapping["4"] = CheckOutcome.LIVE
+
+    async def _expired_then_fresh(url: str) -> bytes | None:
+        if "expired" in url:
+            return None
+        return await orig_fetch(url)
+
+    fail_checker.fetch_avatar_bytes = _expired_then_fresh
+    m_refresh = MagicMock(spec=Message)
+    m_refresh.answer_photo = AsyncMock(
+        return_value=MagicMock(photo=[MagicMock(file_id="fresh_fid")])
+    )
+    m_refresh.answer = AsyncMock()
+    await _answer_watch_card(m_refresh, expired_item, watch_service=svc)
+    m_refresh.answer_photo.assert_awaited_once()
+    assert expired_item.fb_name == "Trang Linh"
+    assert expired_item.avatar_url == "https://scontent.xx.fbcdn.net/avatar.jpg"
+    assert expired_item.avatar_file_id == "fresh_fid"
 
     # cb_wizard edge cases: expired draft, recover draft from text + pick_price + skip_faq, empty recheck_all
     router = create_watch_router(svc)

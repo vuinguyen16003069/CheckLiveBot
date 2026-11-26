@@ -584,6 +584,30 @@ class WatchService:
     async def fetch_avatar_bytes(self, url: str) -> bytes | None:
         return await self._checker.fetch_avatar_bytes(url)
 
+    async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+        return await self._checker.fetch_profile_info(uid)
+
+    async def save_profile_snapshot(
+        self,
+        item: WatchItem,
+        *,
+        fb_name: str | None = None,
+        avatar_url: str | None = None,
+        avatar_file_id: str | None = None,
+    ) -> None:
+        changed = False
+        if fb_name and item.fb_name != fb_name:
+            item.fb_name = fb_name
+            changed = True
+        if avatar_url and item.avatar_url != avatar_url:
+            item.avatar_url = avatar_url
+            changed = True
+        if avatar_file_id is not None and item.avatar_file_id != avatar_file_id:
+            item.avatar_file_id = avatar_file_id
+            changed = True
+        if changed:
+            await self._repo.update(item)
+
     async def update_watch(
         self,
         chat_id: int,

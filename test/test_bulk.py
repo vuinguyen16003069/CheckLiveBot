@@ -674,4 +674,14 @@ async def test_bulk_edge_cases_cancel_all_errors_small_txt_and_smart_text() -> N
     await msg_handlers["handle_smart_plain_text"](m_vanity, state)
     m_vanity.answer.assert_awaited_once()
 
+    # cb_recheck_single on a LIVE photo message that turns DIE replaces it with plain text
+    q_to_die = MagicMock()
+    q_to_die.message = _make_msg()
+    q_to_die.message.photo = [MagicMock()]
+    q_to_die.message.delete = AsyncMock()
+    q_to_die.answer = AsyncMock()
+    await cb_handlers["cb_recheck_single"](q_to_die, RecheckSingleCallback(uid="8"))
+    q_to_die.message.answer.assert_awaited_once()
+    q_to_die.message.delete.assert_awaited_once()
+
     await svc.close()

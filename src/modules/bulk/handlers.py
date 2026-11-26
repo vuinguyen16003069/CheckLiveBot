@@ -174,8 +174,13 @@ def create_bulk_router(bulk_service: BulkCheckService) -> Router:
         text = format_single_check(uid, outcome, fb_name=fb_name)
         markup = build_single_check_markup(uid, outcome)
         if msg.photo:
-            with contextlib.suppress(TelegramBadRequest):
-                await msg.edit_caption(caption=text, reply_markup=markup)
+            if outcome == CheckOutcome.LIVE:
+                with contextlib.suppress(TelegramBadRequest):
+                    await msg.edit_caption(caption=text, reply_markup=markup)
+            else:
+                await msg.answer(text, reply_markup=markup)
+                with contextlib.suppress(TelegramBadRequest):
+                    await msg.delete()
         elif outcome == CheckOutcome.LIVE and avatar_url:
             if await _send_single_photo(msg, bulk_service, uid, avatar_url, text, markup):
                 with contextlib.suppress(TelegramBadRequest):
@@ -286,15 +291,18 @@ async def _send_single_photo(
 ) -> bool:
     avatar_bytes = await bulk_service.fetch_avatar_bytes(avatar_url)
     if not avatar_bytes:
+        logger.warning("bulk_single_avatar_empty uid=%s", uid)
         return False
-    with contextlib.suppress(TelegramBadRequest):
+    try:
         await message.answer_photo(
             photo=BufferedInputFile(avatar_bytes, filename=f"{uid}.jpg"),
             caption=caption,
             reply_markup=reply_markup,
         )
         return True
-    return False
+    except TelegramBadRequest as exc:
+        logger.warning("bulk_single_photo_rejected uid=%s error=%s", uid, exc)
+        return False
 
 
 async def _reply_single_check(

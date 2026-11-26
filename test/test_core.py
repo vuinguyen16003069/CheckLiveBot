@@ -429,12 +429,14 @@ async def test_fetch_profile_info_uses_singleflight_and_ttl_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_fetch_profile_single_request_no_negative_cache_and_avatar_bytes() -> None:
-    # 1. Sends exactly 1 request to www.facebook.com with WhatsApp crawler UA; empty/HTTP>=400 is NOT cached
+    # 1. Sends 1 request to www.facebook.com with WhatsApp crawler UA; HTTP>=400/login wall is NOT cached
     sess = _FakeSession(
         [
             SimpleNamespace(status_code=403, text=""),
             SimpleNamespace(
-                status_code=200, text="<html><head><title>Log in to Facebook</title></head></html>"
+                status_code=200,
+                url="https://www.facebook.com/login/?next=...",
+                text="<html><head><title>Log in to Facebook</title></head></html>",
             ),
             SimpleNamespace(
                 status_code=200,
@@ -456,7 +458,7 @@ async def test_fetch_profile_single_request_no_negative_cache_and_avatar_bytes()
     assert all("www.facebook.com" in url for url, _ in sess.calls)
     assert sess.calls[0][1]["headers"]["User-Agent"].startswith("WhatsApp/")
 
-    # 2. fetch_avatar_bytes validates status, content-type, and non-empty bytes
+    # 2. fetch_avatar_bytes validates status, content-type, non-HTML payload, and non-empty bytes
     avt_sess = _FakeSession(
         [
             SimpleNamespace(
@@ -468,6 +470,7 @@ async def test_fetch_profile_single_request_no_negative_cache_and_avatar_bytes()
             SimpleNamespace(
                 status_code=200, headers={"content-type": "text/html"}, content=b"<html/>"
             ),
+            SimpleNamespace(status_code=200, headers={}, content=b"<!DOCTYPE html><html>"),
         ]
     )
     checker_avt = CurlCffiFacebookChecker(session=avt_sess)  # type: ignore[arg-type]
@@ -475,8 +478,9 @@ async def test_fetch_profile_single_request_no_negative_cache_and_avatar_bytes()
         await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/a.jpg")
         == b"\xff\xd8\xff"
     )
-    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/a.jpg") is None
-    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/a.jpg") is None
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/403.jpg") is None
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/html_ct.jpg") is None
+    assert await checker_avt.fetch_avatar_bytes("https://scontent.xx.fbcdn.net/html.jpg") is None
     assert await checker_avt.fetch_avatar_bytes("not-a-url") is None
 
 
@@ -740,16 +744,32 @@ async def test_checker_cache_eviction_inflight_cancel_avatar_limits_and_head_ear
 
     sess = _FakeSession(
         [
-            SimpleNamespace(status_code=200, text='<meta property="og:title" content="First" />'),
             SimpleNamespace(
-                status_code=200, text='<meta property="og:title" content="Refreshed" />'
+                status_code=200,
+                text=(
+                    '<meta property="og:title" content="First" />'
+                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/1.jpg" />'
+                ),
+            ),
+            SimpleNamespace(
+                status_code=200,
+                text=(
+                    '<meta property="og:title" content="Refreshed" />'
+                    '<meta property="og:image" content="https://scontent.xx.fbcdn.net/2.jpg" />'
+                ),
             ),
         ]
     )
     checker = CurlCffiFacebookChecker(session=sess)  # type: ignore[arg-type]
-    assert await checker.fetch_profile_info("1") == ("First", None)
+    assert await checker.fetch_profile_info("1") == (
+        "First",
+        "https://scontent.xx.fbcdn.net/1.jpg",
+    )
     now_ref[0] += 61.0
-    assert await checker.fetch_profile_info("1") == ("Refreshed", None)
+    assert await checker.fetch_profile_info("1") == (
+        "Refreshed",
+        "https://scontent.xx.fbcdn.net/2.jpg",
+    )
     assert len(sess.calls) == 2
 
     # Fill 512 entries with expired items -> next cache write prunes expired entries
