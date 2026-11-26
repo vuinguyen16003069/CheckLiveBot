@@ -187,11 +187,11 @@ def format_watch_card(item: WatchItem, title: str | None = None) -> str:
         else item.created_at.replace(tzinfo=UTC)
     )
     vn_time = aware_time.astimezone(timezone(timedelta(hours=7))).strftime("%H:%M:%S %d/%m/%Y")
-    lines.append(f"🕒 <b>Thời gian:</b> {_spoiler(vn_time, item.is_hidden)}")
+    lines.append(f"🕒 <b>Thời gian khởi tạo:</b> {_spoiler(vn_time, item.is_hidden)}")
 
     if item.live_detected_at:
         elapsed = format_duration(item.created_at, item.live_detected_at)
-        lines.append(f"⏱ <b>Thời Gian Xử Lý:</b> {_spoiler(elapsed, item.is_hidden)}")
+        lines.append(f"└ <b>Thời gian xử lý:</b> {_spoiler(elapsed, item.is_hidden)}")
 
     return "\n".join(lines)
 

@@ -138,7 +138,7 @@ def test_parse_add_line_duration_and_card_formatting() -> None:
     hidden_card = format_watch_card(item)
     assert "<tg-spoiler>100012345678901</tg-spoiler>" in hidden_card
     assert "<tg-spoiler><code>" not in hidden_card
-    assert "<b>Thời gian:</b> <tg-spoiler>" in hidden_card
+    assert "<b>Thời gian khởi tạo:</b> <tg-spoiler>" in hidden_card
 
     # LIVE notification includes FAQ → LIVE and elapsed duration
     live_item = item.model_copy(
