@@ -186,7 +186,7 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert any("Quay lại" in btn.text for btn in kb3.inline_keyboard[1])
 
     kb4 = build_wizard_keyboard(step=4)
-    assert [btn.text for btn in kb4.inline_keyboard[0]] == ["282", "956", "583", "⏭ Bỏ qua"]
+    assert [btn.text for btn in kb4.inline_keyboard[0]] == ["282", "956", "583"]
 
     sample_item = WatchItem(id=7, chat_id=1, owner_user_id=1, uid="10001", note="N", price="0")
     list_kb = build_list_keyboard("ALL", 2, 3)
@@ -244,12 +244,12 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     assert any("Xác nhận xóa #7" in btn.text for btn in del_kb.inline_keyboard[0])
 
     die_kb = build_watch_keyboard(sample_item)
-    assert [btn.text for btn in die_kb.inline_keyboard[0]] == ["🙈 Ẩn thông tin"]
+    assert [btn.text for btn in die_kb.inline_keyboard[0]] == [
+        "🙈 Ẩn thông tin",
+        "🐵 Hiện thông tin",
+    ]
     assert [btn.text for btn in die_kb.inline_keyboard[1]] == ["❌ Hủy kèo", "🗑 Xóa"]
     assert [btn.text for btn in die_kb.inline_keyboard[2]] == ["✏️ Sửa", "🔙 Về danh sách"]
-
-    hidden_kb = build_watch_keyboard(sample_item.model_copy(update={"is_hidden": True}))
-    assert [btn.text for btn in hidden_kb.inline_keyboard[0]] == ["🐵 Hiện thông tin"]
 
     live_item = sample_item.model_copy(update={"status": WatchStatus.LIVE})
     live_kb = build_watch_keyboard(live_item)
@@ -269,9 +269,6 @@ def test_ui_keyboards_list_formats_and_wizard_recovery() -> None:
     cancelled_texts = [btn.text for row in cancelled_kb.inline_keyboard for btn in row]
     assert "❌ Hủy kèo" not in cancelled_texts
     assert "✅ Done kèo" not in cancelled_texts
-
-    step4_texts = [btn.text for row in build_wizard_keyboard(step=4).inline_keyboard for btn in row]
-    assert "⏭ Bỏ qua" in step4_texts
 
     edit_draft = DealDraft(uid="10001", edit_watch_id=7)
     assert "SỬA KÈO #7" in format_wizard_step(2, edit_draft)

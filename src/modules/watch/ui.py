@@ -98,10 +98,6 @@ def build_wizard_keyboard(step: int, *, min_step: int = 1) -> InlineKeyboardMark
                     text="583",
                     callback_data=WizardCallback(action="pick_faq", value="583").pack(),
                 ),
-                InlineKeyboardButton(
-                    text="⏭ Bỏ qua",
-                    callback_data=WizardCallback(action="skip_faq").pack(),
-                ),
             ]
         )
 
@@ -157,24 +153,15 @@ def build_watch_keyboard(
     back_status: str | None = "ALL",
     back_page: int = 1,
 ) -> InlineKeyboardMarkup:
-    toggle_btn = (
-        InlineKeyboardButton(
-            text="🐵 Hiện thông tin",
-            callback_data=WatchActionCallback(action="show", watch_id=item.id).pack(),
-        )
-        if item.is_hidden
-        else InlineKeyboardButton(
-            text="🙈 Ẩn thông tin",
-            callback_data=WatchActionCallback(action="hide", watch_id=item.id).pack(),
-        )
-    )
-    rows: list[list[InlineKeyboardButton]] = [[toggle_btn]]
-
     def _btn(text: str, action: str) -> InlineKeyboardButton:
         return InlineKeyboardButton(
             text=text,
             callback_data=WatchActionCallback(action=action, watch_id=item.id).pack(),
         )
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [_btn("🙈 Ẩn thông tin", "hide"), _btn("🐵 Hiện thông tin", "show")]
+    ]
 
     back_btn = (
         InlineKeyboardButton(
