@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -1248,5 +1249,124 @@ async def test_watch_hardening_scan_race_all_ttl_length_caps_and_group_auth() ->
     cancelled_item = await repo.get(group_item.id)
     assert cancelled_item is not None
     assert cancelled_item.status == WatchStatus.CANCELLED
+
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_strict_watch_concurrency_ttl_validation_url_add_and_wizard_caps() -> None:
+    # 1. WatchTtlPolicy rejects invalid bounds & computes expiry_ts / clamped remaining_ttl
+    with pytest.raises(ValueError, match="die_days"):
+        WatchTtlPolicy(die_days=0)
+    with pytest.raises(ValueError, match="seq_days"):
+        WatchTtlPolicy(seq_days=-1)
+
+    policy = WatchTtlPolicy()
+    old_time = datetime.now(UTC) - timedelta(days=500)
+    expired_item = WatchItem(
+        id=1,
+        chat_id=10,
+        owner_user_id=1,
+        uid="10001",
+        note="Old",
+        price="0",
+        status=WatchStatus.CANCELLED,
+        created_at=old_time,
+        last_checked_at=old_time,
+        completed_at=old_time,
+    )
+    assert policy.remaining_ttl(expired_item) == 1
+    assert policy.expiry_ts(expired_item) < datetime.now(UTC).timestamp()
+
+    # 2. Concurrent add_watch for same UID in same chat under RedisLock creates EXACTLY 1 watch
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    lock = RedisLock(redis, prefix="strict_w")
+    repo = RedisWatchRepository(redis, prefix="strict_w", ttl_policy=policy)
+    assert repo.ttl_policy == policy
+
+    class _SlowCheckStub(_StubChecker):
+        async def check(self, uid: str) -> UidCheckResult:
+            await asyncio.sleep(0.03)
+            return await super().check(uid)
+
+    checker = _SlowCheckStub({"100004030621748": CheckOutcome.DIE, "100088": CheckOutcome.DIE})
+    svc = WatchService(repo=repo, checker=checker, lock=lock)
+
+    results = await asyncio.gather(
+        svc.add_watch(500, 1, "100088 | First | 10k"),
+        svc.add_watch(500, 1, "100088 | Second | 20k"),
+        return_exceptions=True,
+    )
+    created_items = [r for r in results if isinstance(r, WatchItem)]
+    errors = [r for r in results if isinstance(r, Exception)]
+    assert len(created_items) == 1
+    assert len(errors) == 1
+    items_500, total_500, _ = await svc.list_watches(500)
+    assert total_500 == 1
+    assert len(items_500) == 1
+
+    # 3. add_watch via vanity Facebook URL resolves UID & rejects unresolvable URL clearly
+    via_url = await svc.add_watch(500, 1, "https://www.facebook.com/vuinguyen.2026 | VIP | 50k")
+    assert via_url.uid == "100004030621748"
+    assert (
+        await svc.resolve_input_uid("https://www.facebook.com/vuinguyen.2026") == "100004030621748"
+    )
+    with pytest.raises(ValueError, match="Không lấy được UID từ link Facebook"):
+        await svc.add_watch(500, 1, "https://www.facebook.com/unknown.dead.user | Note")
+
+    # 4. save_profile_snapshot & save_avatar_file_id update only when changed
+    await svc.save_profile_snapshot(
+        via_url,
+        fb_name="Vui Nguyễn",
+        avatar_url="https://scontent.xx.fbcdn.net/v.jpg",
+        avatar_file_id="fid_1",
+    )
+    reloaded = await svc.get_watch(500, via_url.id)
+    assert (reloaded.fb_name, reloaded.avatar_url, reloaded.avatar_file_id) == (
+        "Vui Nguyễn",
+        "https://scontent.xx.fbcdn.net/v.jpg",
+        "fid_1",
+    )
+    await svc.save_avatar_file_id(reloaded, "fid_1")  # unchanged -> no-op
+
+    # 5. Concurrent scan_once() with shared RedisLock NEVER double-notifies the same watch
+    checker.mapping["100088"] = CheckOutcome.LIVE
+    checker.verify_mapping["100088"] = (CheckOutcome.LIVE, "Live User")
+    notifier = _StubNotifier()
+    scanner = WatcherScanService(repo=repo, checker=checker, lock=lock, notifier=notifier)
+    c1, c2 = await asyncio.gather(scanner.scan_once(), scanner.scan_once())
+    assert c1 + c2 == 1
+    assert len(notifier.notified) == 1
+
+    # 6. list_chat_items with status_filter on page=2 prunes expired items cleanly
+    for idx in range(12):
+        uid = str(800000 + idx)
+        checker.mapping[uid] = CheckOutcome.DIE
+        await svc.add_watch(600, 1, f"{uid} | Item {idx}")
+    p2_items, p2_total, p2_pages = await svc.list_watches(
+        600, status_filter=WatchStatus.DIE, page=2
+    )
+    assert (len(p2_items), p2_total, p2_pages) == (2, 12, 2)
+
+    # 7. Wizard step handlers strictly enforce 400 / 64 / 128 char limits without advancing state
+    router = create_watch_router(svc)
+    msg_handlers = {h.callback.__name__: h.callback for h in router.message.handlers}
+    state = MagicMock()
+    state.get_data = AsyncMock(return_value={})
+    state.set_state = AsyncMock()
+    bot = AsyncMock()
+
+    for handler_name, bad_text, expected_limit in (
+        ("wizard_step_note", "n" * 401, "400"),
+        ("wizard_step_price", "p" * 65, "64"),
+        ("wizard_step_faq", "f" * 129, "128"),
+    ):
+        msg = MagicMock(spec=Message)
+        msg.text = bad_text
+        msg.answer = AsyncMock()
+        await msg_handlers[handler_name](msg, state, bot)
+        msg.answer.assert_awaited_once()
+        assert expected_limit in msg.answer.call_args.args[0]
+        state.set_state.assert_not_awaited()
 
     await redis.aclose()

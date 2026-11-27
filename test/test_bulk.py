@@ -805,3 +805,79 @@ async def test_bulk_hardening_busy_guard_truncation_and_group_auth() -> None:
 
     gate.set()
     await svc.close()
+
+
+@pytest.mark.asyncio
+async def test_strict_bulk_worker_crash_isolation_cancellation_and_adversarial_parsing() -> None:
+    from src.modules.bulk.domain import extract_fb_url, extract_uids_from_text
+
+    # 1. Adversarial UID & URL extraction: BOM, CRLF, leading zeros, 21-digit, non-profile paths
+    raw = "\ufeff012345\r\n123456789012345678901\r\nuser: 100001234567890 (note)\r\n4\r\n4\r\n"
+    uids, skipped, truncated = extract_uids_from_text(raw, max_uids=10)
+    assert uids == ["100001234567890", "4"]
+    assert skipped == 3  # 012345, 21-digit, duplicate "4"
+    assert truncated == 0
+
+    uids_cap, _, trunc_cap = extract_uids_from_text("10001\n10002\n10003\n10004\n", max_uids=2)
+    assert uids_cap == ["10001", "10002"]
+    assert trunc_cap == 2
+
+    for bad_url in (
+        "https://facebook.com/login/identify",
+        "https://www.facebook.com/reel/12345",
+        "https://fb.com/sharer.php?u=x",
+        "https://facebook.com/zuck extra",
+        "https://facebook.com/zuck\n4",
+        "https://example.com/zuck",
+    ):
+        assert extract_fb_url(bad_url) is None
+
+    # 2. Worker exception inside start_bulk_uids cancels sibling workers, notifies user, releases busy lock
+    sibling_cancelled = asyncio.Event()
+
+    class _CrashingChecker:
+        async def check(self, uid: str) -> UidCheckResult:
+            if uid == "10001":
+                await asyncio.sleep(0.01)
+                raise RuntimeError("fatal worker crash")
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def verify_live(self, uid: str) -> UidCheckResult:
+            return UidCheckResult(uid=uid, outcome=CheckOutcome.LIVE)
+
+        async def fetch_profile_info(self, uid: str) -> tuple[str | None, str | None]:
+            return None, None
+
+        async def fetch_avatar_bytes(self, url: str) -> bytes | None:
+            return None
+
+        async def resolve_uid_from_url(self, url: str) -> str | None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    notifier = _StubBulkNotifier()
+    svc = BulkCheckService(checker=_CrashingChecker(), concurrency=2, progress_interval_seconds=0.5)
+    job_id, total, _ = svc.start_bulk_text(
+        chat_id=900,
+        text="10001\n10002\n",
+        status_message_id=77,
+        notifier=notifier,
+    )
+    assert total == 2
+    assert svc.is_chat_busy(900) is True
+    await asyncio.wait_for(sibling_cancelled.wait(), timeout=2.0)
+    # Wait for background runner cleanup
+    for _ in range(50):
+        if not svc.is_chat_busy(900):
+            break
+        await asyncio.sleep(0.01)
+    assert svc.is_chat_busy(900) is False
+    assert any(job_id in msg and "gặp sự cố" in msg for msg in notifier.progress_updates)
+    await svc.close()

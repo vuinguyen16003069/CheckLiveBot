@@ -29,8 +29,7 @@ def _is_allowed_fb_url(url: str) -> bool:
         return False
     host = parsed.hostname.lower()
     return any(
-        host == base or host.endswith(f".{base}")
-        for base in ("facebook.com", "fb.com", "fb.watch")
+        host == base or host.endswith(f".{base}") for base in ("facebook.com", "fb.com", "fb.watch")
     )
 
 

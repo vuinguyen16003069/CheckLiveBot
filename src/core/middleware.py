@@ -10,6 +10,7 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
+
 def _is_group_bot_interaction(message: Message) -> bool:
     chat = getattr(message, "chat", None)
     chat_type = getattr(chat, "type", None)

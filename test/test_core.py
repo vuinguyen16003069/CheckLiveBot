@@ -952,3 +952,151 @@ async def test_core_hardening_group_throttle_ssrf_and_proxy_redaction() -> None:
         )
         == "100098765432100"
     )
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.facebook.com/zuck", True),
+        ("https://m.facebook.com/profile.php?id=4", True),
+        ("http://mbasic.fb.com/10001", True),
+        ("https://fb.watch/xyz/", True),
+        ("ftp://facebook.com/zuck", False),
+        ("javascript:alert(1)", False),
+        ("file:///etc/passwd", False),
+        ("https://facebook.com.evil.com/zuck", False),
+        ("https://notfacebook.com/zuck", False),
+        ("https://facebook.com@evil.com/zuck", False),
+        ("http://127.0.0.1/facebook.com", False),
+        ("", False),
+    ],
+)
+def test_strict_ssrf_allowlist_matrix(url: str, expected: bool) -> None:
+    from src.core.checker import _is_allowed_fb_url  # type: ignore[reportPrivateUsage]
+
+    assert _is_allowed_fb_url(url) is expected
+
+
+@pytest.mark.asyncio
+async def test_strict_telegram_auth_middleware_and_redis_lock_edge_cases() -> None:
+    from aiogram.exceptions import TelegramAPIError
+    from aiogram.methods import GetChatMember
+
+    from src.core.telegram import is_actor_authorized
+
+    # 1. is_actor_authorized fails closed on missing bot, invalid actor, non-admin, and TelegramAPIError
+    group_chat = SimpleNamespace(id=-10055, type="supergroup")
+    private_chat = SimpleNamespace(id=55, type="private")
+    assert await is_actor_authorized(None, private_chat, 99, 10) is True  # type: ignore[arg-type]
+    assert await is_actor_authorized(None, group_chat, 99, 0) is True  # type: ignore[arg-type]
+    assert await is_actor_authorized(None, group_chat, 10, 10) is True  # type: ignore[arg-type]
+    assert await is_actor_authorized(None, group_chat, 99, 10) is False  # type: ignore[arg-type]
+
+    bot_ok = AsyncMock()
+    bot_ok.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="creator"))
+    assert await is_actor_authorized(bot_ok, group_chat, 0, 10) is False  # type: ignore[arg-type]
+    assert await is_actor_authorized(bot_ok, group_chat, 99, 10) is True  # type: ignore[arg-type]
+
+    bot_err = AsyncMock()
+    bot_err.get_chat_member = AsyncMock(
+        side_effect=TelegramAPIError(
+            method=GetChatMember(chat_id=-10055, user_id=99),
+            message="chat not found",
+        )
+    )
+    assert await is_actor_authorized(bot_err, group_chat, 99, 10) is False  # type: ignore[arg-type]
+
+    # 2. ThrottlingMiddleware group filters: .txt doc, reply-to-bot, empty media, and FB hint
+    mw = ThrottlingMiddleware(limit_per_minute=1)
+    handler = AsyncMock(return_value="ok")
+
+    def _group_msg(
+        *,
+        user_id: int,
+        text: str | None = None,
+        file_name: str | None = None,
+        reply_is_bot: bool = False,
+    ) -> MagicMock:
+        m = MagicMock(spec=Message)
+        m.chat = SimpleNamespace(id=-10055, type="supergroup")
+        m.from_user = SimpleNamespace(id=user_id)
+        m.text = text
+        m.document = SimpleNamespace(file_name=file_name) if file_name else None
+        m.reply_to_message = (
+            SimpleNamespace(from_user=SimpleNamespace(is_bot=reply_is_bot))
+            if reply_is_bot
+            else None
+        )
+        m.answer = AsyncMock()
+        return m
+
+    # Empty/media-only group message bypasses throttle
+    m_empty = _group_msg(user_id=101, text=None)
+    assert await mw(handler, m_empty, {}) == "ok"
+    assert await mw(handler, m_empty, {}) == "ok"
+
+    # .txt document in group IS throttled
+    m_txt = _group_msg(user_id=102, file_name="UIDS.TXT")
+    assert await mw(handler, m_txt, {}) == "ok"
+    assert await mw(handler, m_txt, {}) is None
+    m_txt.answer.assert_awaited_once()
+
+    # Reply to bot in group IS throttled
+    m_reply = _group_msg(user_id=103, text="normal reply", reply_is_bot=True)
+    assert await mw(handler, m_reply, {}) == "ok"
+    assert await mw(handler, m_reply, {}) is None
+    m_reply.answer.assert_awaited_once()
+
+    # 3. RedisLock release_lock on unheld key is a safe no-op & concurrent acquire allows only 1 winner
+    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    lock_a = RedisLock(redis, prefix="strict")
+    lock_b = RedisLock(redis, prefix="strict")
+    await lock_a.release_lock("never-held")
+    winners = await asyncio.gather(
+        lock_a.acquire_lock("race-key", 60),
+        lock_b.acquire_lock("race-key", 60),
+    )
+    assert winners.count(True) == 1
+    assert winners.count(False) == 1
+    await redis.aclose()
+
+
+@pytest.mark.asyncio
+async def test_strict_checker_resolve_uid_streaming_errors_and_proxy_redaction() -> None:
+    # 1. Streaming response exceeding max_bytes without UID returns None and closes response
+    class _BigNoUidResp:
+        status_code = 200
+        url = "https://www.facebook.com/no.uid.here"
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def aiter_content(self) -> Any:
+            for _ in range(10):
+                yield b"x" * 100000
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    big_resp = _BigNoUidResp()
+    # 2. Exception containing proxy credentials is handled cleanly and fails proxy
+    sess = _FakeSession(
+        [
+            big_resp,
+            RuntimeError("connect failed via http://alice:topsecret@10.0.0.2:8080"),
+        ]
+    )
+    checker = CurlCffiFacebookChecker(
+        proxies=["http://alice:topsecret@10.0.0.2:8080"],
+        session=sess,  # type: ignore[arg-type]
+    )
+    assert await checker.resolve_uid_from_url("https://www.facebook.com/no.uid.here") is None
+    assert big_resp.closed is True
+    assert await checker.resolve_uid_from_url("https://www.facebook.com/boom") is None
+    assert checker._proxy_pool.has_healthy_proxy() is False  # type: ignore[reportPrivateUsage]
+
+    # 3. _check_direct returns ERROR on unexpected non-retryable exception
+    checker._fetch_graph_once = AsyncMock(side_effect=ValueError("unexpected parse bug"))  # type: ignore[method-assign]
+    res = await checker.check("100099")
+    assert res.outcome == CheckOutcome.ERROR
+    assert res.detail == "unexpected parse bug"
