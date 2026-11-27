@@ -10,10 +10,6 @@ from typing import Any
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
-_GROUP_SHORTCUTS = frozenset({"➕ Lên kèo", "📋 Danh sách", "🔎 Check nhanh", "📊 Thống kê"})
-_GROUP_FB_HINT_RE = re.compile(r"(?:facebook|fb)\.com/|^\d{1,20}$", re.IGNORECASE)
-
-
 def _is_group_bot_interaction(message: Message) -> bool:
     chat = getattr(message, "chat", None)
     chat_type = getattr(chat, "type", None)
@@ -31,9 +27,9 @@ def _is_group_bot_interaction(message: Message) -> bool:
         return False
     return (
         text.startswith("/")
-        or text in _GROUP_SHORTCUTS
+        or text in {"➕ Lên kèo", "📋 Danh sách", "🔎 Check nhanh", "📊 Thống kê"}
         or "\n" in text
-        or bool(_GROUP_FB_HINT_RE.search(text))
+        or bool(re.search(r"(?:facebook|fb)\.com/|^\d{1,20}$", text, re.IGNORECASE))
     )
 
 

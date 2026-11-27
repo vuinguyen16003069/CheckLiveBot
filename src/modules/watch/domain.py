@@ -50,11 +50,6 @@ class ParsedWatchInput(BaseModel):
     faq: str = ""
 
 
-MAX_NOTE_LEN = 400
-MAX_PRICE_LEN = 64
-MAX_FAQ_LEN = 128
-
-
 def normalize_watch_fields(
     note: str,
     price: str,
@@ -67,12 +62,12 @@ def normalize_watch_fields(
     cleaned_faq = faq.strip()
     if cleaned_faq == "-":
         cleaned_faq = ""
-    if len(cleaned_note) > MAX_NOTE_LEN:
-        raise ValueError(f"Ghi chú tối đa {MAX_NOTE_LEN} ký tự.")
-    if len(cleaned_price) > MAX_PRICE_LEN:
-        raise ValueError(f"Giá tối đa {MAX_PRICE_LEN} ký tự.")
-    if len(cleaned_faq) > MAX_FAQ_LEN:
-        raise ValueError(f"FAQ tối đa {MAX_FAQ_LEN} ký tự.")
+    if len(cleaned_note) > 400:
+        raise ValueError("Ghi chú tối đa 400 ký tự.")
+    if len(cleaned_price) > 64:
+        raise ValueError("Giá tối đa 64 ký tự.")
+    if len(cleaned_faq) > 128:
+        raise ValueError("FAQ tối đa 128 ký tự.")
     return cleaned_note, cleaned_price, cleaned_faq
 
 

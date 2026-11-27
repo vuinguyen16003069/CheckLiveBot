@@ -1122,15 +1122,13 @@ async def test_watch_service_repo_and_handler_edge_cases() -> None:
 
 @pytest.mark.asyncio
 async def test_watch_hardening_scan_race_all_ttl_length_caps_and_group_auth() -> None:
-    from src.modules.watch.domain import MAX_FAQ_LEN, MAX_NOTE_LEN, MAX_PRICE_LEN
-
     # 1. Field length validation in parse_add_line & WatchService.update_watch
-    with pytest.raises(ValueError, match=str(MAX_NOTE_LEN)):
-        parse_add_line(f"10001 | {'n' * (MAX_NOTE_LEN + 1)} | 50k | 282")
-    with pytest.raises(ValueError, match=str(MAX_PRICE_LEN)):
-        parse_add_line(f"10001 | ok | {'p' * (MAX_PRICE_LEN + 1)} | 282")
-    with pytest.raises(ValueError, match=str(MAX_FAQ_LEN)):
-        parse_add_line(f"10001 | ok | 50k | {'f' * (MAX_FAQ_LEN + 1)}")
+    with pytest.raises(ValueError, match="400"):
+        parse_add_line(f"10001 | {'n' * 401} | 50k | 282")
+    with pytest.raises(ValueError, match="64"):
+        parse_add_line(f"10001 | ok | {'p' * 65} | 282")
+    with pytest.raises(ValueError, match="128"):
+        parse_add_line(f"10001 | ok | 50k | {'f' * 129}")
 
     redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     policy = WatchTtlPolicy(die_days=90, live_days=60, done_days=30, cancelled_days=14)

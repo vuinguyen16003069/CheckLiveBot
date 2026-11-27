@@ -19,21 +19,20 @@ class BulkSummary(BaseModel):
     truncated: int = 0
 
 
-_PROFILE_ID_RE = re.compile(r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})", re.IGNORECASE)
-_PEOPLE_UID_RE = re.compile(
-    r"(?:(?:facebook|fb)\.com/people/[^/?#\s]+/)([1-9]\d{0,19})(?:[/?#\s]|$)",
-    re.IGNORECASE,
-)
-_DIRECT_UID_URL_RE = re.compile(
-    r"(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([1-9]\d{0,19})(?:[/?#\s]|$)",
-    re.IGNORECASE,
-)
-_FB_URL_RE = re.compile(
-    r"^(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([^\s?#]+)",
-    re.IGNORECASE,
-)
-_NON_PROFILE_SEGMENTS: frozenset[str] = frozenset(
-    {
+def extract_fb_url(raw: str) -> str | None:
+    """Return normalized https Facebook profile/share URL if raw is a Facebook link."""
+    text = raw.strip()
+    if not text or "\n" in text or " " in text:
+        return None
+    match = re.match(
+        r"^(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([^\s?#]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    first_segment = match.group(1).strip("/").split("/", 1)[0].lower()
+    if not first_segment or first_segment in {
         "login",
         "groups",
         "watch",
@@ -53,21 +52,7 @@ _NON_PROFILE_SEGMENTS: frozenset[str] = frozenset(
         "pages",
         "hashtag",
         "search",
-    }
-)
-_EMBEDDED_UID_RE = re.compile(r"\b([1-9]\d{4,19})\b")
-
-
-def extract_fb_url(raw: str) -> str | None:
-    """Return normalized https Facebook profile/share URL if raw is a Facebook link."""
-    text = raw.strip()
-    if not text or "\n" in text or " " in text:
-        return None
-    match = _FB_URL_RE.match(text)
-    if not match:
-        return None
-    first_segment = match.group(1).strip("/").split("/", 1)[0].lower()
-    if not first_segment or first_segment in _NON_PROFILE_SEGMENTS:
+    }:
         return None
     return text if text.lower().startswith(("http://", "https://")) else f"https://{text}"
 
@@ -78,8 +63,12 @@ def extract_uid(raw: str) -> str | None:
         return None
     if text.isascii() and text.isdigit():
         return text if len(text) <= 20 and text[0] != "0" else None
-    for pattern in (_PROFILE_ID_RE, _PEOPLE_UID_RE, _DIRECT_UID_URL_RE):
-        if match := pattern.search(text):
+    for pattern in (
+        r"(?:profile\.php\?[^#\s]*\bid=)([1-9]\d{0,19})",
+        r"(?:(?:facebook|fb)\.com/people/[^/?#\s]+/)([1-9]\d{0,19})(?:[/?#\s]|$)",
+        r"(?:https?://)?(?:(?:www|m|mbasic|web)\.)?(?:facebook|fb)\.com/([1-9]\d{0,19})(?:[/?#\s]|$)",
+    ):
+        if match := re.search(pattern, text, re.IGNORECASE):
             return match.group(1)
     return None
 
@@ -99,7 +88,7 @@ def extract_uids_from_text(text: str, max_uids: int = 50000) -> tuple[list[str],
             continue
         uid = extract_uid(stripped)
         if uid is None:
-            token_match = _EMBEDDED_UID_RE.search(stripped)
+            token_match = re.search(r"\b([1-9]\d{4,19})\b", stripped)
             uid = token_match.group(1) if token_match else None
         if uid is None:
             skipped += 1

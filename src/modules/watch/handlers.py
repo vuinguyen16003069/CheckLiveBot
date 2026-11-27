@@ -22,9 +22,6 @@ from src.core.ports import FacebookCheckerPort
 from src.core.telegram import is_actor_authorized
 from src.modules.bulk.domain import extract_uid
 from src.modules.watch.domain import (
-    MAX_FAQ_LEN,
-    MAX_NOTE_LEN,
-    MAX_PRICE_LEN,
     WatchItem,
     WatchStatus,
     format_live_notification,
@@ -277,16 +274,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
     @router.message(WizardStates.waiting_note, F.text)
     async def wizard_step_note(message: Message, state: FSMContext, bot: Bot) -> None:
         note = (message.text or "").strip() or "Theo dõi nhanh"
-        if len(note) > MAX_NOTE_LEN:
-            await message.answer(
-                f"⚠️ Ghi chú tối đa {MAX_NOTE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn."
-            )
-            return
-        note = (message.text or "").strip() or "Theo dõi nhanh"
-        if len(note) > MAX_NOTE_LEN:
-            await message.answer(
-                f"⚠️ Ghi chú tối đa {MAX_NOTE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn."
-            )
+        if len(note) > 400:
+            await message.answer("⚠️ Ghi chú tối đa 400 ký tự. Vui lòng nhập ngắn gọn hơn.")
             return
         draft = await _load_draft(state)
         draft.note = note
@@ -295,8 +284,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
     @router.message(WizardStates.waiting_price, F.text)
     async def wizard_step_price(message: Message, state: FSMContext, bot: Bot) -> None:
         price = (message.text or "").strip() or "0"
-        if len(price) > MAX_PRICE_LEN:
-            await message.answer(f"⚠️ Giá tối đa {MAX_PRICE_LEN} ký tự. Vui lòng nhập ngắn gọn hơn.")
+        if len(price) > 64:
+            await message.answer("⚠️ Giá tối đa 64 ký tự. Vui lòng nhập ngắn gọn hơn.")
             return
         draft = await _load_draft(state)
         draft.price = price
@@ -306,8 +295,8 @@ def create_watch_router(watch_service: WatchService) -> Router:
     async def wizard_step_faq(message: Message, state: FSMContext, bot: Bot) -> None:
         faq = (message.text or "").strip()
         cleaned_faq = "" if faq == "-" else faq
-        if len(cleaned_faq) > MAX_FAQ_LEN:
-            await message.answer(f"⚠️ FAQ tối đa {MAX_FAQ_LEN} ký tự. Vui lòng nhập ngắn gọn hơn.")
+        if len(cleaned_faq) > 128:
+            await message.answer("⚠️ FAQ tối đa 128 ký tự. Vui lòng nhập ngắn gọn hơn.")
             return
         draft = await _load_draft(state)
         draft.faq = cleaned_faq

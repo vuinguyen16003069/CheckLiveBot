@@ -19,12 +19,8 @@ from src.core.ports import CheckOutcome, UidCheckResult
 logger = logging.getLogger(__name__)
 
 
-_PROXY_AUTH_RE = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
-_ALLOWED_FB_HOSTS = ("facebook.com", "fb.com", "fb.watch")
-
-
 def _redact_proxy_auth(value: object) -> str:
-    return _PROXY_AUTH_RE.sub("://***:***@", str(value))
+    return re.sub(r"://[^/\s:@]+:[^/\s@]+@", "://***:***@", str(value))
 
 
 def _is_allowed_fb_url(url: str) -> bool:
@@ -32,7 +28,10 @@ def _is_allowed_fb_url(url: str) -> bool:
     if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
         return False
     host = parsed.hostname.lower()
-    return any(host == base or host.endswith(f".{base}") for base in _ALLOWED_FB_HOSTS)
+    return any(
+        host == base or host.endswith(f".{base}")
+        for base in ("facebook.com", "fb.com", "fb.watch")
+    )
 
 
 def _meta_content(body: str, prop: str) -> str | None:
